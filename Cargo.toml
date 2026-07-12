@@ -1,0 +1,74 @@
+[package]
+name = "up-transport-dds"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+license = "Apache-2.0"
+description = "Dust DDS RTPS transport families for Eclipse uProtocol"
+readme = "README.md"
+repository = "https://github.com/PLeVasseur/up-transport-dds-rust"
+include = [
+    "/.cargo/**",
+    "/.github/**",
+    "/benches/**",
+    "/docs/**",
+    "/idl/**",
+    "/src/**",
+    "/tests/**",
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/LICENSE",
+    "/NOTICE",
+    "/README.md",
+    "/deny.toml",
+]
+
+[dependencies]
+async-trait = "0.1.88"
+bytes = "1.11.1"
+clap = { version = "4.5.41", features = ["derive"] }
+dust_dds = "=0.15.0"
+tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "31ee659aae9588fabfd99678730a8229a0cdc18c", default-features = false, features = ["owned-frame-transport", "protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-uninit"] }
+up-wire-arrow = { version = "0.1.0", git = "https://github.com/PLeVasseur/up-wire-arrow-rust.git", rev = "0f064f049124f3dce9d2413fcb73cf05e87d8f35" }
+up-wire-omgidl = { version = "0.1.0", git = "https://github.com/PLeVasseur/up-wire-omgidl-rust.git", rev = "280378616ade087340c89c5c65237ed14a32eaaf" }
+up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "27a6451ac6f46b2f30cebb82b5f0ada04eb78146" }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", default-features = false }
+
+[[bench]]
+name = "transport_criterion"
+harness = false
+
+[[bin]]
+name = "dds_publisher"
+path = "src/bin/dds_publisher.rs"
+
+[[bin]]
+name = "dds_subscriber"
+path = "src/bin/dds_subscriber.rs"
+
+[[bin]]
+name = "dds_notifier"
+path = "src/bin/dds_notifier.rs"
+
+[[bin]]
+name = "dds_notifyee"
+path = "src/bin/dds_notifyee.rs"
+
+[[bin]]
+name = "dds_client"
+path = "src/bin/dds_client.rs"
+
+[[bin]]
+name = "dds_server"
+path = "src/bin/dds_server.rs"
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

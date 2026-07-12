@@ -1,0 +1,44 @@
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+# The exact XCDRv2 revision carries Apache-2.0 SPDX headers but predates
+# manifest license fields. Hash-pinned clarifications fail closed if those
+# authoritative source headers change.
+[[licenses.clarify]]
+crate = "up-wire-xcdrv2@0.0.0"
+expression = "Apache-2.0"
+license-files = [{ path = "src/lib.rs", hash = 0x81ed8fac }]
+
+[[licenses.clarify]]
+crate = "up-wire-xcdrv2-macros@0.0.0"
+expression = "Apache-2.0"
+license-files = [{ path = "src/lib.rs", hash = 0x4b30d771 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/PLeVasseur/up-rust.git",
+    "https://github.com/PLeVasseur/up-wire-arrow-rust.git",
+    "https://github.com/PLeVasseur/up-wire-omgidl-rust.git",
+    "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git",
+]

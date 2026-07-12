@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: Apache-2.0
+// Normative outer DDS carriage. Selected-wire metadata and payload are octet
+// sequences and are never interpreted by the physical transport.
+module uprotocol {
+  module transport {
+    module dds {
+      struct ClassicSampleV1 {
+        string origin_id;
+        sequence<octet> attributes_proto;
+        boolean has_payload;
+        sequence<octet> payload;
+      };
+
+      struct OwnedSampleV1 {
+        string origin_id;
+        sequence<octet> metadata_fields;
+        boolean has_payload;
+        sequence<octet> payload;
+      };
+
+      struct ZeroCopySampleV1 {
+        string origin_id;
+        string source_uri;
+        boolean has_sink;
+        string sink_uri;
+        boolean has_payload;
+        sequence<octet> encoded_metadata;
+        sequence<octet> payload;
+      };
+    };
+  };
+};

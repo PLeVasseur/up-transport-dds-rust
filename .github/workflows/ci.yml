@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: ["1.88.0", "1.95.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy,rustfmt
+      - run: cargo check --locked --all-targets
+      - run: cargo test --locked --all-targets
+      - if: matrix.rust == '1.95.0'
+        run: cargo fmt --all -- --check
+      - if: matrix.rust == '1.95.0'
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - if: matrix.rust == '1.95.0'
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
+      - if: matrix.rust == '1.95.0'
+        run: cargo test --locked --doc
+      - if: matrix.rust == '1.95.0'
+        run: cargo bench --locked --no-run
+      - if: matrix.rust == '1.95.0'
+        run: cargo package --locked --list
+      - if: matrix.rust == '1.95.0'
+        run: cargo install cargo-deny --locked
+      - if: matrix.rust == '1.95.0'
+        run: cargo deny check advisories licenses bans sources
