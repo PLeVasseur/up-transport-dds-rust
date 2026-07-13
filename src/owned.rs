@@ -21,8 +21,9 @@ use up_rust::{
 };
 
 use crate::runtime::{
-    dds_status, join_worker, reader_qos, run_callback, start_dispatcher, submit, wait_until,
-    writer_qos, HealthErrorKind, Registry, StopToken,
+    complete_on_drop, complete_send, dds_status, join_worker, reader_qos, run_callback,
+    start_dispatcher, submit, tracks_delivery, wait_until, writer_qos, DeliveryTracker,
+    HealthErrorKind, Registry, StopToken,
 };
 use crate::{DdsConfig, DdsHealth};
 
@@ -50,6 +51,7 @@ pub struct UPTransportDdsOwned {
     writer: Option<DataWriter<UpDdsOwnedSampleV1>>,
     participant: Option<DomainParticipant>,
     registrations: Arc<Registry<dyn UOwnedListener>>,
+    delivery: DeliveryTracker,
     health: DdsHealth,
     stop: StopToken,
     poller: Option<JoinHandle<()>>,
@@ -114,10 +116,12 @@ impl UPTransportDdsOwned {
             .map_err(|error| dds_status("create owned reader", error))?;
 
         let registrations = Arc::<Registry<dyn UOwnedListener>>::default();
+        let delivery = DeliveryTracker::default();
         let health = DdsHealth::default();
         let stop = StopToken::default();
         let (dispatch, dispatcher) = start_dispatcher(config.dispatch_capacity, health.clone())?;
         let poll_registrations = Arc::clone(&registrations);
+        let poll_delivery = delivery.clone();
         let poll_health = health.clone();
         let poll_stop = stop.clone();
         let callback_stop = stop.clone();
@@ -138,6 +142,7 @@ impl UPTransportDdsOwned {
                                     continue;
                                 };
                                 if sample.origin_id == poll_config.origin_id {
+                                    poll_delivery.record_delivery();
                                     continue;
                                 }
                                 let frame = match decode_owned(sample) {
@@ -195,6 +200,7 @@ impl UPTransportDdsOwned {
             writer: Some(writer),
             participant: Some(participant),
             registrations,
+            delivery,
             health,
             stop,
             poller: Some(poller),
@@ -273,6 +279,7 @@ impl UOwnedTransportImpl for UPTransportDdsOwned {
             .writer
             .as_ref()
             .ok_or_else(|| UStatus::fail_with_code(UCode::Unavailable, "transport is closed"))?;
+        let _write_guard = tracks_delivery(&self.config).then(|| self.delivery.write_guard());
         writer
             .write(
                 UpDdsOwnedSampleV1 {
@@ -287,7 +294,14 @@ impl UOwnedTransportImpl for UPTransportDdsOwned {
                 self.health
                     .record(HealthErrorKind::Dds, format!("owned writer: {error}"));
                 dds_status("write owned sample", error)
-            })
+            })?;
+        complete_send(
+            writer,
+            &self.config,
+            &self.health,
+            &self.delivery,
+            "acknowledge owned sample",
+        )
     }
 
     async fn register_validated_owned_listener(
@@ -313,6 +327,15 @@ impl UOwnedTransportImpl for UPTransportDdsOwned {
 
 impl Drop for UPTransportDdsOwned {
     fn drop(&mut self) {
+        if let Some(writer) = self.writer.as_ref() {
+            complete_on_drop(
+                writer,
+                &self.config,
+                &self.health,
+                &self.delivery,
+                "acknowledge owned samples during teardown",
+            );
+        }
         self.stop.stop();
         join_worker(self.poller.take(), "owned poller", &self.health);
         self.registrations.deactivate_all();

@@ -13,7 +13,8 @@ mod runtime;
 pub mod zero_copy;
 
 pub use runtime::{
-    DdsConfig, DdsHealth, DdsQos, HealthErrorKind, HealthEvent, HealthSnapshot, Reliability,
+    AcknowledgmentMode, DdsConfig, DdsHealth, DdsQos, HealthErrorKind, HealthEvent, HealthSnapshot,
+    Reliability,
 };
 
 use std::sync::Arc;
@@ -37,8 +38,9 @@ use up_rust::{
 };
 
 use crate::runtime::{
-    dds_status, join_worker, reader_qos, run_callback, start_dispatcher, submit, wait_until,
-    writer_qos, HealthErrorKind as ErrorKind, Registry, StopToken,
+    complete_on_drop, complete_send, dds_status, join_worker, reader_qos, run_callback,
+    start_dispatcher, submit, tracks_delivery, wait_until, writer_qos, DeliveryTracker,
+    HealthErrorKind as ErrorKind, Registry, StopToken,
 };
 
 /// Versioned classic-family DDS topic.
@@ -65,6 +67,7 @@ pub struct UPTransportDds {
     writer: Option<DataWriter<UpDdsClassicSampleV1>>,
     participant: Option<DomainParticipant>,
     registrations: Arc<Registry<dyn UListener>>,
+    delivery: DeliveryTracker,
     health: DdsHealth,
     stop: StopToken,
     poller: Option<JoinHandle<()>>,
@@ -129,10 +132,12 @@ impl UPTransportDds {
             .map_err(|error| dds_status("create classic reader", error))?;
 
         let registrations = Arc::<Registry<dyn UListener>>::default();
+        let delivery = DeliveryTracker::default();
         let health = DdsHealth::default();
         let stop = StopToken::default();
         let (dispatch, dispatcher) = start_dispatcher(config.dispatch_capacity, health.clone())?;
         let poll_registrations = Arc::clone(&registrations);
+        let poll_delivery = delivery.clone();
         let poll_health = health.clone();
         let poll_stop = stop.clone();
         let callback_stop = stop.clone();
@@ -153,6 +158,7 @@ impl UPTransportDds {
                                     continue;
                                 };
                                 if sample.origin_id == poll_config.origin_id {
+                                    poll_delivery.record_delivery();
                                     continue;
                                 }
                                 let message = match decode_classic(sample) {
@@ -209,6 +215,7 @@ impl UPTransportDds {
             writer: Some(writer),
             participant: Some(participant),
             registrations,
+            delivery,
             health,
             stop,
             poller: Some(poller),
@@ -291,6 +298,7 @@ impl UTransport for UPTransportDds {
             .writer
             .as_ref()
             .ok_or_else(|| UStatus::fail_with_code(UCode::Unavailable, "transport is closed"))?;
+        let _write_guard = tracks_delivery(&self.config).then(|| self.delivery.write_guard());
         writer
             .write(
                 UpDdsClassicSampleV1 {
@@ -305,7 +313,14 @@ impl UTransport for UPTransportDds {
                 self.health
                     .record(ErrorKind::Dds, format!("classic writer: {error}"));
                 dds_status("write classic sample", error)
-            })
+            })?;
+        complete_send(
+            writer,
+            &self.config,
+            &self.health,
+            &self.delivery,
+            "acknowledge classic sample",
+        )
     }
 
     async fn register_listener(
@@ -333,6 +348,15 @@ impl UTransport for UPTransportDds {
 
 impl Drop for UPTransportDds {
     fn drop(&mut self) {
+        if let Some(writer) = self.writer.as_ref() {
+            complete_on_drop(
+                writer,
+                &self.config,
+                &self.health,
+                &self.delivery,
+                "acknowledge classic samples during teardown",
+            );
+        }
         self.stop.stop();
         join_worker(self.poller.take(), "classic poller", &self.health);
         self.registrations.deactivate_all();

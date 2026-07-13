@@ -28,8 +28,9 @@ use up_rust::transport_implementer_api::{
 use up_rust::{UCode, UFrameMetadata, UStatus, UTxBuffer, UUninitTxBuffer, UUri};
 
 use crate::runtime::{
-    dds_status, join_worker, reader_qos, run_callback, start_dispatcher, submit, wait_until,
-    writer_qos, AlignedBytes, HealthErrorKind, Registry, StopToken,
+    complete_on_drop, complete_send, dds_status, join_worker, reader_qos, run_callback,
+    start_dispatcher, submit, tracks_delivery, wait_until, writer_qos, AlignedBytes,
+    DeliveryTracker, HealthErrorKind, Registry, StopToken,
 };
 use crate::{DdsConfig, DdsHealth};
 
@@ -164,6 +165,7 @@ pub struct DdsZeroCopyCore {
     writer: Option<DataWriter<UpDdsZeroCopySampleV1>>,
     participant: Option<DomainParticipant>,
     registrations: Arc<Registry<EncodedListener>>,
+    delivery: DeliveryTracker,
     health: DdsHealth,
     stop: StopToken,
     poller: Option<JoinHandle<()>>,
@@ -228,10 +230,12 @@ impl DdsZeroCopyCore {
             .map_err(|error| dds_status("create zero-copy reader", error))?;
 
         let registrations = Arc::<Registry<EncodedListener>>::default();
+        let delivery = DeliveryTracker::default();
         let health = DdsHealth::default();
         let stop = StopToken::default();
         let (dispatch, dispatcher) = start_dispatcher(config.dispatch_capacity, health.clone())?;
         let poll_registrations = Arc::clone(&registrations);
+        let poll_delivery = delivery.clone();
         let poll_health = health.clone();
         let poll_stop = stop.clone();
         let callback_stop = stop.clone();
@@ -252,6 +256,7 @@ impl DdsZeroCopyCore {
                                     continue;
                                 };
                                 if sample.origin_id == poll_config.origin_id {
+                                    poll_delivery.record_delivery();
                                     continue;
                                 }
                                 let (source, sink, frame) = match decode_zero_copy(sample) {
@@ -313,6 +318,7 @@ impl DdsZeroCopyCore {
             writer: Some(writer),
             participant: Some(participant),
             registrations,
+            delivery,
             health,
             stop,
             poller: Some(poller),
@@ -417,6 +423,7 @@ impl UZeroCopyTransportCore for DdsZeroCopyCore {
     }
 
     async fn send_prepared_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
+        let _write_guard = tracks_delivery(&self.config).then(|| self.delivery.write_guard());
         let writer = self
             .writer
             .as_ref()
@@ -441,7 +448,14 @@ impl UZeroCopyTransportCore for DdsZeroCopyCore {
                 self.health
                     .record(HealthErrorKind::Dds, format!("zero-copy writer: {error}"));
                 dds_status("write zero-copy sample", error)
-            })
+            })?;
+        complete_send(
+            writer,
+            &self.config,
+            &self.health,
+            &self.delivery,
+            "acknowledge zero-copy sample",
+        )
     }
 
     async fn register_encoded_zero_copy_listener(
@@ -488,6 +502,15 @@ impl UZeroCopyUninitTransportCore for DdsZeroCopyCore {
 
 impl Drop for DdsZeroCopyCore {
     fn drop(&mut self) {
+        if let Some(writer) = self.writer.as_ref() {
+            complete_on_drop(
+                writer,
+                &self.config,
+                &self.health,
+                &self.delivery,
+                "acknowledge zero-copy samples during teardown",
+            );
+        }
         self.stop.stop();
         join_worker(self.poller.take(), "zero-copy poller", &self.health);
         self.registrations.deactivate_all();

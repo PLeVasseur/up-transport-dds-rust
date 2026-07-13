@@ -16,7 +16,10 @@ take copy bytes. See `docs/wire-contract.md` for the exact contract.
 ## Configuration
 
 `DdsConfig` makes the DDS domain, exact origin identity, reliability, history
-depth, polling interval, per-take limit, and bounded callback queue explicit.
+depth, polling interval, per-take limit, bounded callback queue, and reliable
+delivery-completion policy explicit. `AcknowledgmentMode::OnDrop` uses one
+bounded budget to flush send-once transports during teardown, `PerSend`
+returns completion failures from `send`, and `Disabled` is fire-and-forget.
 Each instance suppresses only samples carrying its own origin. `wait_ready`
 uses DDS `PublicationMatchedStatus`; applications do not need retry sends to
 cover discovery.
@@ -26,6 +29,8 @@ transport wakes and joins its poller, cancels callback work, drains the bounded
 dispatcher, and deletes the participant's contained entities. Successful
 listener unregistration waits for an in-flight callback and prevents any
 snapshotted-but-not-started callback from running afterward.
+`DdsHealth` retains teardown completion failures after the transport is gone;
+`PerSend` failures are both returned and recorded exactly once.
 
 ## Role Binaries
 
@@ -86,7 +91,8 @@ cargo deny check advisories licenses bans sources
 ```
 
 The integration suite uses distinct Dust DDS participants and includes
-cross-process classic pub/sub, owned notification, and Arrow RPC over RTPS.
+cross-process classic pub/sub, owned notification, and 100 immediate-drop
+owned Arrow RPC iterations over RTPS.
 Criterion rows separate classic publication, owned encode/publication, and
 selected-wire loan/encode/publication. They use explicit best-effort QoS to
 measure nonblocking send-stage cost; they are not delivery, receive, or RTT

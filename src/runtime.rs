@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use dust_dds::infrastructure::error::DdsError;
 use dust_dds::infrastructure::qos::{DataReaderQos, DataWriterQos};
 use dust_dds::infrastructure::qos_policy::{HistoryQosPolicyKind, ReliabilityQosPolicyKind};
+use dust_dds::publication::data_writer::DataWriter;
 use up_rust::{UCode, UStatus, UUri};
 
 static NEXT_ORIGIN: AtomicU64 = AtomicU64::new(1);
@@ -26,6 +27,17 @@ pub enum Reliability {
     Reliable,
     /// Best-effort DDS delivery.
     BestEffort,
+}
+
+/// Reliable-writer delivery-completion policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcknowledgmentMode {
+    /// Wait for all matched reliable readers when the transport is dropped.
+    OnDrop,
+    /// Wait after every write and return acknowledgment failures to the sender.
+    PerSend,
+    /// Return after DDS accepts each write and do not flush during teardown.
+    Disabled,
 }
 
 /// Configurable `QoS` used by all three carriage families.
@@ -55,6 +67,10 @@ pub struct DdsConfig {
     pub origin_id: String,
     /// DDS endpoint `QoS`.
     pub qos: DdsQos,
+    /// When reliable writes must be acknowledged by matched reliable readers.
+    pub acknowledgment_mode: AcknowledgmentMode,
+    /// Maximum time spent in one DDS writer acknowledgment wait.
+    pub acknowledgment_timeout: Duration,
     /// Maximum queued callback jobs.
     pub dispatch_capacity: usize,
     /// Maximum samples taken in one poll.
@@ -72,6 +88,8 @@ impl DdsConfig {
             domain_id,
             origin_id: format!("{}-{sequence}", std::process::id()),
             qos: DdsQos::default(),
+            acknowledgment_mode: AcknowledgmentMode::OnDrop,
+            acknowledgment_timeout: Duration::from_secs(5),
             dispatch_capacity: 256,
             max_samples_per_poll: 64,
             poll_interval: Duration::from_millis(2),
@@ -94,6 +112,13 @@ impl DdsConfig {
         if self.qos.history_depth == 0 {
             return Err(invalid("history_depth must be greater than zero"));
         }
+        if self.acknowledgment_mode != AcknowledgmentMode::Disabled
+            && self.acknowledgment_timeout.is_zero()
+        {
+            return Err(invalid(
+                "acknowledgment_timeout must be greater than zero when acknowledgments are enabled",
+            ));
+        }
         Ok(())
     }
 }
@@ -114,6 +139,8 @@ pub struct HealthEvent {
 pub enum HealthErrorKind {
     /// DDS reader or writer operation failed.
     Dds,
+    /// A reliable writer's bounded acknowledgment wait failed.
+    DeliveryCompletion,
     /// A decoded outer sample violated its contract.
     MalformedSample,
     /// The bounded callback queue was full or disconnected.
@@ -130,6 +157,7 @@ pub enum HealthErrorKind {
 struct HealthState {
     next_sequence: u64,
     dds_errors: u64,
+    delivery_completion_errors: u64,
     malformed_samples: u64,
     dispatch_drops: u64,
     callback_panics: u64,
@@ -143,6 +171,8 @@ struct HealthState {
 pub struct HealthSnapshot {
     /// DDS operation failures.
     pub dds_errors: u64,
+    /// Reliable-writer acknowledgment failures.
+    pub delivery_completion_errors: u64,
     /// Rejected decoded outer samples.
     pub malformed_samples: u64,
     /// Callback jobs rejected by bounded dispatch.
@@ -168,6 +198,7 @@ impl DdsHealth {
         let state = lock(&self.0);
         HealthSnapshot {
             dds_errors: state.dds_errors,
+            delivery_completion_errors: state.delivery_completion_errors,
             malformed_samples: state.malformed_samples,
             dispatch_drops: state.dispatch_drops,
             callback_panics: state.callback_panics,
@@ -181,6 +212,7 @@ impl DdsHealth {
         let mut state = lock(&self.0);
         match kind {
             HealthErrorKind::Dds => state.dds_errors += 1,
+            HealthErrorKind::DeliveryCompletion => state.delivery_completion_errors += 1,
             HealthErrorKind::MalformedSample => state.malformed_samples += 1,
             HealthErrorKind::DispatchBackpressure => state.dispatch_drops += 1,
             HealthErrorKind::CallbackPanic => state.callback_panics += 1,
@@ -212,6 +244,131 @@ pub(crate) fn writer_qos(config: &DdsQos) -> DataWriterQos {
     qos.history.kind = HistoryQosPolicyKind::KeepLast(config.history_depth);
     qos.reliability.kind = reliability(config.reliability);
     qos
+}
+
+pub(crate) fn complete_send<Foo>(
+    writer: &DataWriter<Foo>,
+    config: &DdsConfig,
+    health: &DdsHealth,
+    delivery: &DeliveryTracker,
+    context: &str,
+) -> Result<(), UStatus> {
+    if !tracks_delivery(config) {
+        return Ok(());
+    }
+    let target = delivery.record_write();
+    if config.acknowledgment_mode == AcknowledgmentMode::PerSend {
+        wait_for_acknowledgments(writer, config, health, delivery, target, context)
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn complete_on_drop<Foo>(
+    writer: &DataWriter<Foo>,
+    config: &DdsConfig,
+    health: &DdsHealth,
+    delivery: &DeliveryTracker,
+    context: &str,
+) {
+    if config.acknowledgment_mode == AcknowledgmentMode::OnDrop {
+        let _ = wait_for_acknowledgments(
+            writer,
+            config,
+            health,
+            delivery,
+            delivery.write_count(),
+            context,
+        );
+    }
+}
+
+pub(crate) fn tracks_delivery(config: &DdsConfig) -> bool {
+    config.qos.reliability == Reliability::Reliable
+        && config.acknowledgment_mode != AcknowledgmentMode::Disabled
+}
+
+fn wait_for_acknowledgments<Foo>(
+    writer: &DataWriter<Foo>,
+    config: &DdsConfig,
+    health: &DdsHealth,
+    delivery: &DeliveryTracker,
+    target: u64,
+    context: &str,
+) -> Result<(), UStatus> {
+    if target == 0 {
+        return Ok(());
+    }
+    let deadline = Instant::now() + config.acknowledgment_timeout;
+    if !delivery.wait_for_delivery_until(target, deadline) {
+        let detail = format!("{context}: local DDS delivery timed out");
+        health.record(HealthErrorKind::DeliveryCompletion, &detail);
+        return Err(UStatus::fail_with_code(UCode::DeadlineExceeded, detail));
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    writer
+        .wait_for_acknowledgments(remaining.into())
+        .map_err(|error| {
+            health.record(
+                HealthErrorKind::DeliveryCompletion,
+                format!("{context}: {error}"),
+            );
+            dds_status(context, error)
+        })
+}
+
+#[derive(Debug, Default)]
+struct DeliveryState {
+    writes: u64,
+    deliveries: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DeliveryTracker {
+    state: Arc<(Mutex<DeliveryState>, Condvar)>,
+    write: Arc<Mutex<()>>,
+}
+
+impl DeliveryTracker {
+    pub(crate) fn write_guard(&self) -> MutexGuard<'_, ()> {
+        lock(&self.write)
+    }
+
+    pub(crate) fn record_write(&self) -> u64 {
+        let mut state = lock(&self.state.0);
+        state.writes += 1;
+        state.writes
+    }
+
+    pub(crate) fn record_delivery(&self) {
+        let mut state = lock(&self.state.0);
+        state.deliveries += 1;
+        self.state.1.notify_all();
+    }
+
+    fn write_count(&self) -> u64 {
+        lock(&self.state.0).writes
+    }
+
+    fn wait_for_delivery_until(&self, target: u64, deadline: Instant) -> bool {
+        let mut state = lock(&self.state.0);
+        while state.deliveries < target {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next_state, wait_result) = self
+                .state
+                .1
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next_state;
+            if wait_result.timed_out() && state.deliveries < target {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn reliability(value: Reliability) -> ReliabilityQosPolicyKind {

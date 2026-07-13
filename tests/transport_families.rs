@@ -14,7 +14,9 @@ use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use tokio::sync::{mpsc, Mutex, Notify};
 use up_rust::selected_wire_user_api::UWithNativePrefixWire as _;
-use up_rust::transport_implementer_api::{UEncodedRxFrame, UEncodedZeroCopyListener};
+use up_rust::transport_implementer_api::{
+    UEncodedRxFrame, UEncodedZeroCopyListener, UZeroCopyTransportCore,
+};
 use up_rust::{
     try_project_umessage_to_frame_metadata, EncodePayload, PayloadEncoding, PayloadFormat, UCode,
     UFrameMetadata, UFrameView, UListener, UMessage, UMessageBuilder, UOwnedFrame, UOwnedListener,
@@ -25,7 +27,7 @@ use up_transport_dds::owned::{
     UPTransportDdsOwned, UpDdsOwnedSampleV1, OWNED_TOPIC_V1, OWNED_TYPE_V1,
 };
 use up_transport_dds::zero_copy::{DdsRxFrame, DdsZeroCopyCore};
-use up_transport_dds::{DdsConfig, UPTransportDds};
+use up_transport_dds::{AcknowledgmentMode, DdsConfig, DdsHealth, UPTransportDds};
 
 const WAIT: Duration = Duration::from_secs(8);
 static DDS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
@@ -312,8 +314,14 @@ macro_rules! selected_wire_round_trip {
         async fn $name() {
             let _test_guard = DDS_TEST_LOCK.lock().await;
             let source = topic($tag);
-            let sender_core =
-                DdsZeroCopyCore::new($domain, tokio::runtime::Handle::current()).expect("sender");
+            let sender_core = DdsZeroCopyCore::with_config(
+                DdsConfig {
+                    acknowledgment_mode: AcknowledgmentMode::PerSend,
+                    ..DdsConfig::new($domain)
+                },
+                tokio::runtime::Handle::current(),
+            )
+            .expect("sender");
             let receiver_core =
                 DdsZeroCopyCore::new($domain, tokio::runtime::Handle::current()).expect("receiver");
             sender_core.wait_ready(2, WAIT).expect("sender discovery");
@@ -553,7 +561,14 @@ async fn zero_copy_core_carries_metadata_opaquely_and_routes_from_sideband() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
 
     let source = topic(13);
-    let sender = DdsZeroCopyCore::new(186, tokio::runtime::Handle::current()).expect("sender");
+    let sender = DdsZeroCopyCore::with_config(
+        DdsConfig {
+            acknowledgment_mode: AcknowledgmentMode::PerSend,
+            ..DdsConfig::new(186)
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .expect("sender");
     let receiver = DdsZeroCopyCore::new(186, tokio::runtime::Handle::current()).expect("receiver");
     sender.wait_ready(2, WAIT).expect("sender discovery");
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -722,6 +737,300 @@ async fn unregister_waits_for_inflight_and_prevents_later_callbacks() {
         .expect("send after unregister");
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert_eq!(listener.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn immediate_drop_rpc_responses_complete_across_all_families_and_selected_wires() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let method = endpoint("one-shot-server").clone_with_resource_id(0x1001);
+    let client = endpoint("one-shot-client");
+    let owned_receiver =
+        UPTransportDdsOwned::new(70, tokio::runtime::Handle::current()).expect("owned receiver");
+    let owned_receiver_health = owned_receiver.health();
+    let (owned_tx, mut owned_rx) = mpsc::unbounded_channel();
+    owned_receiver
+        .register_owned_listener(&method, Some(&client), Arc::new(OwnedChannel(owned_tx)))
+        .await
+        .expect("owned listener");
+
+    let payload = b"owned-arrow-one-shot".to_vec();
+    let response = rpc_response(
+        &method,
+        &client,
+        payload.clone(),
+        up_wire_arrow::ArrowWire::encoding(),
+    );
+    let sender =
+        UPTransportDdsOwned::new(70, tokio::runtime::Handle::current()).expect("owned sender");
+    sender.wait_ready(2, WAIT).expect("owned discovery");
+    owned_receiver
+        .wait_ready(2, WAIT)
+        .expect("reverse owned discovery");
+    let health = sender.health();
+    let metadata = try_project_umessage_to_frame_metadata(&response).expect("owned metadata");
+    sender
+        .send_owned(UOwnedFrame::with_payload(metadata, payload.clone()).expect("owned frame"))
+        .await
+        .expect("owned response");
+    drop(sender);
+    let owned_frame = tokio::time::timeout(WAIT, owned_rx.recv())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "owned Arrow response timed out: {error}; receiver health: {:?}",
+                owned_receiver_health.snapshot()
+            )
+        })
+        .expect("owned response");
+    assert_eq!(owned_frame.payload_bytes(), payload);
+    assert_bounded_completion(&health);
+
+    classic_one_shot(192, &method, &client, b"classic-one-shot").await;
+
+    zero_copy_one_shot(
+        193,
+        rpc_response(&method, &client, b"xcdr".to_vec(), PayloadEncoding::RAW),
+        &method,
+        &client,
+        b"xcdr",
+        up_wire_xcdrv2::XcdrV2Wire,
+        up_wire_xcdrv2::XcdrV2Wire::encoding(),
+    )
+    .await;
+    zero_copy_one_shot(
+        194,
+        rpc_response(
+            &method,
+            &client,
+            b"arrow".to_vec(),
+            up_wire_arrow::ArrowWire::encoding(),
+        ),
+        &method,
+        &client,
+        b"arrow",
+        up_wire_arrow::ArrowWire,
+        up_wire_arrow::ArrowWire::encoding(),
+    )
+    .await;
+    zero_copy_one_shot(
+        195,
+        rpc_response(
+            &method,
+            &client,
+            b"omgidl".to_vec(),
+            up_wire_omgidl::OmgIdlWire::encoding(),
+        ),
+        &method,
+        &client,
+        b"omgidl",
+        up_wire_omgidl::OmgIdlWire,
+        up_wire_omgidl::OmgIdlWire::encoding(),
+    )
+    .await;
+}
+
+async fn classic_one_shot(domain_id: i32, method: &UUri, client: &UUri, payload: &[u8]) {
+    let response = rpc_response(method, client, payload.to_vec(), PayloadEncoding::RAW);
+    let receiver = UPTransportDds::new(domain_id, tokio::runtime::Handle::current())
+        .expect("classic receiver");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_listener(method, Some(client), Arc::new(MessageChannel(tx)))
+        .await
+        .expect("classic listener");
+    let sender =
+        UPTransportDds::new(domain_id, tokio::runtime::Handle::current()).expect("classic sender");
+    sender.wait_ready(2, WAIT).expect("classic discovery");
+    let health = sender.health();
+    sender.send(response).await.expect("classic response");
+    drop(sender);
+    assert_clean_completion(&health);
+    let message = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .expect("classic response timeout")
+        .expect("classic response");
+    assert_eq!(message.payload().expect("classic payload"), payload);
+}
+
+async fn zero_copy_one_shot<W>(
+    domain_id: i32,
+    response: UMessage,
+    method: &UUri,
+    client: &UUri,
+    payload: &[u8],
+    wire: W,
+    payload_encoding: PayloadEncoding,
+) where
+    W: up_rust::wire_implementer_api::UWire + Copy + Send + Sync + 'static,
+    up_rust::wire_implementer_api::NativePrefixFrameMetadataCodec:
+        up_rust::wire_implementer_api::UWireMetadataCodecFor<W>,
+{
+    let receiver =
+        DdsZeroCopyCore::new(domain_id, tokio::runtime::Handle::current()).expect("receiver");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_encoded_zero_copy_listener(method, Some(client), Arc::new(EncodedChannel(tx)))
+        .await
+        .expect("zero-copy listener");
+    let health = send_zero_copy_response(
+        domain_id,
+        response,
+        payload.to_vec(),
+        wire,
+        payload_encoding,
+    )
+    .await;
+    assert_zero_copy_response(&mut rx, payload).await;
+    assert_clean_completion(&health);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_send_acknowledgment_timeout_is_returned_and_observable() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(14);
+    let receiver = UPTransportDds::new(191, tokio::runtime::Handle::current()).expect("receiver");
+    let sender = UPTransportDds::with_config(
+        DdsConfig {
+            acknowledgment_mode: AcknowledgmentMode::PerSend,
+            acknowledgment_timeout: Duration::from_millis(10),
+            poll_interval: Duration::from_secs(30),
+            ..DdsConfig::new(191)
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .expect("sender");
+    sender.wait_ready(2, WAIT).expect("sender discovery");
+    let health = sender.health();
+
+    let error = sender
+        .send(UMessageBuilder::publish(source).build().expect("message"))
+        .await
+        .expect_err("paused local delivery must time out");
+    assert_eq!(error.get_code(), UCode::DeadlineExceeded);
+    assert!(error
+        .get_message()
+        .is_some_and(|message| message.contains("acknowledge classic sample")));
+    drop(sender);
+    let snapshot = health.snapshot();
+    assert_eq!(snapshot.delivery_completion_errors, 1, "{snapshot:?}");
+    assert_eq!(
+        snapshot.recent_events.last().expect("health event").kind,
+        up_transport_dds::HealthErrorKind::DeliveryCompletion
+    );
+    drop(receiver);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn on_drop_acknowledgment_timeout_is_observable() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(15);
+    let receiver = UPTransportDds::new(196, tokio::runtime::Handle::current()).expect("receiver");
+    let sender = UPTransportDds::with_config(
+        DdsConfig {
+            acknowledgment_timeout: Duration::from_millis(10),
+            poll_interval: Duration::from_secs(30),
+            ..DdsConfig::new(196)
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .expect("sender");
+    sender.wait_ready(2, WAIT).expect("sender discovery");
+    let health = sender.health();
+
+    sender
+        .send(UMessageBuilder::publish(source).build().expect("message"))
+        .await
+        .expect("on-drop mode defers completion");
+    drop(sender);
+
+    let snapshot = health.snapshot();
+    assert_eq!(snapshot.delivery_completion_errors, 1, "{snapshot:?}");
+    assert_eq!(
+        snapshot.recent_events.last().expect("health event").kind,
+        up_transport_dds::HealthErrorKind::DeliveryCompletion
+    );
+    drop(receiver);
+}
+
+fn rpc_response(
+    method: &UUri,
+    client: &UUri,
+    payload: Vec<u8>,
+    encoding: PayloadEncoding,
+) -> UMessage {
+    let request = UMessageBuilder::request(method.clone(), client.clone(), 1_000)
+        .build()
+        .expect("request");
+    UMessageBuilder::response(
+        request.source().clone(),
+        request.id().clone(),
+        request.sink().expect("request method").clone(),
+    )
+    .build_with_payload_encoding(payload, encoding)
+    .expect("response")
+}
+
+async fn send_zero_copy_response<W>(
+    domain_id: i32,
+    response: UMessage,
+    payload: Vec<u8>,
+    wire: W,
+    payload_encoding: PayloadEncoding,
+) -> DdsHealth
+where
+    W: up_rust::wire_implementer_api::UWire + Copy + Send + Sync + 'static,
+    up_rust::wire_implementer_api::NativePrefixFrameMetadataCodec:
+        up_rust::wire_implementer_api::UWireMetadataCodecFor<W>,
+{
+    let core = DdsZeroCopyCore::new(domain_id, tokio::runtime::Handle::current()).expect("sender");
+    core.wait_ready(2, WAIT).expect("zero-copy discovery");
+    let health = core.health();
+    let transport = core.into_native_prefix_wire_transport(wire);
+    let metadata = try_project_umessage_to_frame_metadata(&response)
+        .expect("zero-copy metadata")
+        .with_payload_encoding(payload_encoding)
+        .expect("selected-wire encoding");
+    let mut loan = transport
+        .loan_tx(UTxLoanSpec::payload(metadata, payload.len(), 8).expect("loan spec"))
+        .await
+        .expect("loan");
+    loan.payload_mut().copy_from_slice(&payload);
+    transport
+        .send_zero_copy(loan)
+        .await
+        .expect("zero-copy response");
+    drop(transport);
+    health
+}
+
+async fn assert_zero_copy_response(
+    rx: &mut mpsc::UnboundedReceiver<DdsRxFrame>,
+    expected_payload: &[u8],
+) {
+    let frame = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .expect("zero-copy response timeout")
+        .expect("zero-copy response");
+    assert_eq!(frame.try_contiguous_payload(), Some(expected_payload));
+}
+
+fn assert_clean_completion(health: &DdsHealth) {
+    let snapshot = health.snapshot();
+    assert_eq!(snapshot.delivery_completion_errors, 0, "{snapshot:?}");
+    assert_eq!(snapshot.teardown_errors, 0, "{snapshot:?}");
+}
+
+fn assert_bounded_completion(health: &DdsHealth) {
+    let snapshot = health.snapshot();
+    assert!(snapshot.delivery_completion_errors <= 1, "{snapshot:?}");
+    assert_eq!(snapshot.teardown_errors, 0, "{snapshot:?}");
+    if let Some(event) = snapshot.recent_events.last() {
+        assert_eq!(
+            event.kind,
+            up_transport_dds::HealthErrorKind::DeliveryCompletion
+        );
+        assert!(event.detail.contains("acknowledge"), "{event:?}");
+    }
 }
 
 #[test]

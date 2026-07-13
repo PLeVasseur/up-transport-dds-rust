@@ -31,6 +31,15 @@ fn classic_pubsub_owned_notification_and_arrow_rpc_cross_process() {
         "copy-minimized",
         "arrow",
     );
+    for iteration in 0..100 {
+        run_pair(
+            env!("CARGO_BIN_EXE_dds_server"),
+            env!("CARGO_BIN_EXE_dds_client"),
+            64 + iteration,
+            "owned-frame",
+            "arrow",
+        );
+    }
 }
 
 fn run_pair(passive_bin: &str, active_bin: &str, domain: i32, family: &str, encoding: &str) {
