@@ -13,15 +13,16 @@ use dust_dds::infrastructure::status::NO_STATUS;
 use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use tokio::sync::{mpsc, Mutex, Notify};
+use up_rust::frame::metadata::try_project_umessage_to_frame_metadata;
 use up_rust::selected_wire_user_api::UWithNativePrefixWire as _;
 use up_rust::transport_implementer_api::{
     UEncodedRxFrame, UEncodedZeroCopyListener, UZeroCopyTransportCore,
 };
 use up_rust::{
-    try_project_umessage_to_frame_metadata, EncodePayload, PayloadEncoding, PayloadFormat, UCode,
-    UFrameMetadata, UFrameView, UListener, UMessage, UMessageBuilder, UOwnedFrame, UOwnedListener,
-    UOwnedTransport, UPayloadFormat, UTransport, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri,
-    UZeroCopyListener, UZeroCopyRxLease, UZeroCopyTransport,
+    EncodePayload, PayloadEncoding, PayloadFormat, UCode, UFrameMetadata, UFrameView, UListener,
+    UMessage, UMessageBuilder, UOwnedFrame, UOwnedListener, UOwnedTransport, UPayloadFormat,
+    UTransport, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UZeroCopyListener, UZeroCopyRxLease,
+    UZeroCopyTransport,
 };
 use up_transport_dds::owned::{
     UPTransportDdsOwned, UpDdsOwnedSampleV1, OWNED_TOPIC_V1, OWNED_TYPE_V1,
@@ -174,7 +175,7 @@ async fn all_families_validate_filters_and_none_requires_no_sink() {
         .register_listener(&invalid, None, Arc::new(MessageChannel(tx)))
         .await
         .expect_err("invalid filter must fail");
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 
     let owned = UPTransportDdsOwned::new(172, tokio::runtime::Handle::current()).expect("owned");
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -182,7 +183,7 @@ async fn all_families_validate_filters_and_none_requires_no_sink() {
         .register_owned_listener(&invalid, None, Arc::new(OwnedChannel(tx)))
         .await
         .expect_err("invalid owned filter must fail");
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 
     let zero_copy = DdsZeroCopyCore::new(172, tokio::runtime::Handle::current())
         .expect("zero-copy")
@@ -192,7 +193,7 @@ async fn all_families_validate_filters_and_none_requires_no_sink() {
         .register_zero_copy_listener(&invalid, None, Arc::new(FrameChannel(tx)))
         .await
         .expect_err("invalid zero-copy filter must fail");
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -906,9 +907,9 @@ async fn per_send_acknowledgment_timeout_is_returned_and_observable() {
         .send(UMessageBuilder::publish(source).build().expect("message"))
         .await
         .expect_err("paused local delivery must time out");
-    assert_eq!(error.get_code(), UCode::DeadlineExceeded);
+    assert_eq!(error.code(), UCode::DeadlineExceeded);
     assert!(error
-        .get_message()
+        .message()
         .is_some_and(|message| message.contains("acknowledge classic sample")));
     drop(sender);
     let snapshot = health.snapshot();

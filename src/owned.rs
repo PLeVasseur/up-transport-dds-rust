@@ -16,9 +16,7 @@ use dust_dds::infrastructure::type_support::DdsType;
 use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use up_rust::frame::codec::{decode_frame_metadata_fields, encode_frame_metadata_fields};
-use up_rust::{
-    UCode, UOwnedFrame, UOwnedListener, UOwnedTransportImpl, UStatus, UUri, ValidatedOwnedFrame,
-};
+use up_rust::{UCode, UOwnedFrame, UOwnedListener, UOwnedTransportImpl, UStatus, UUri};
 
 use crate::runtime::{
     complete_on_drop, complete_send, dds_status, join_worker, reader_qos, run_callback,
@@ -255,17 +253,14 @@ fn decode_owned(sample: UpDdsOwnedSampleV1) -> Result<UOwnedFrame, String> {
     let payload = sample
         .has_payload
         .then(|| bytes::Bytes::from(sample.payload));
-    let frame = UOwnedFrame::new_unchecked(metadata, payload);
-    frame
+    UOwnedFrame::new_unchecked(metadata, payload)
         .validate()
-        .map_err(|error| format!("invalid owned frame: {error}"))?;
-    Ok(frame)
+        .map_err(|error| format!("invalid owned frame: {error}"))
 }
 
 #[async_trait]
 impl UOwnedTransportImpl for UPTransportDdsOwned {
-    async fn send_validated_owned(&self, frame: ValidatedOwnedFrame) -> Result<(), UStatus> {
-        let frame = frame.into_inner();
+    async fn send_validated_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
         let metadata_fields = encode_frame_metadata_fields(frame.metadata()).map_err(|error| {
             UStatus::fail_with_code(
                 UCode::InvalidArgument,

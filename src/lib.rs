@@ -31,8 +31,10 @@ use dust_dds::infrastructure::status::NO_STATUS;
 use dust_dds::infrastructure::type_support::DdsType;
 use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
-use up_rust::{
+use up_rust::frame::metadata::{
     try_project_attributes_to_frame_metadata, try_project_frame_to_umessage,
+};
+use up_rust::{
     verify_filter_criteria, ProtobufMappable as _, UAttributes, UCode, UListener, UMessage,
     UStatus, UTransport, UUri,
 };
