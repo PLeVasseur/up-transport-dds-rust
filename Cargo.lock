@@ -1003,7 +1003,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1256,7 +1256,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "up-rust"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=14331c5efc704487a6e1abb20cb8c129207885da#14331c5efc704487a6e1abb20cb8c129207885da"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=c5f13b8bad449edd44fcf1cd87355c1df88b5715#c5f13b8bad449edd44fcf1cd87355c1df88b5715"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1275,7 +1275,7 @@ dependencies = [
 [[package]]
 name = "up-rust-macros"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=14331c5efc704487a6e1abb20cb8c129207885da#14331c5efc704487a6e1abb20cb8c129207885da"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=c5f13b8bad449edd44fcf1cd87355c1df88b5715#c5f13b8bad449edd44fcf1cd87355c1df88b5715"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1301,7 +1301,7 @@ dependencies = [
 [[package]]
 name = "up-wire-arrow"
 version = "0.1.0"
-source = "git+https://github.com/PLeVasseur/up-wire-arrow-rust.git?rev=0941f2411950c0aab48d906693e857ac2c0edb46#0941f2411950c0aab48d906693e857ac2c0edb46"
+source = "git+https://github.com/PLeVasseur/up-wire-arrow-rust.git?rev=93e94aa29f9cd84c839c19d0bcc2b89816f0d614#93e94aa29f9cd84c839c19d0bcc2b89816f0d614"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -1313,7 +1313,7 @@ dependencies = [
 [[package]]
 name = "up-wire-omgidl"
 version = "0.1.0"
-source = "git+https://github.com/PLeVasseur/up-wire-omgidl-rust.git?rev=c5b944beba7996ee5ad0830a5db18bf7b066e5d4#c5b944beba7996ee5ad0830a5db18bf7b066e5d4"
+source = "git+https://github.com/PLeVasseur/up-wire-omgidl-rust.git?rev=cc9065074b8bf022f96c18f5169429acdb2d49eb#cc9065074b8bf022f96c18f5169429acdb2d49eb"
 dependencies = [
  "bytes",
  "dust_dds",
@@ -1323,7 +1323,7 @@ dependencies = [
 [[package]]
 name = "up-wire-xcdrv2"
 version = "0.0.0"
-source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=27942d8e9f3a119ab6f51aa1ee01c7872f841dd7#27942d8e9f3a119ab6f51aa1ee01c7872f841dd7"
+source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=8e93ba270fe1fa51208452f6ae423070a4f6bd81#8e93ba270fe1fa51208452f6ae423070a4f6bd81"
 dependencies = [
  "up-rust",
  "up-wire-xcdrv2-macros",
@@ -1332,7 +1332,7 @@ dependencies = [
 [[package]]
 name = "up-wire-xcdrv2-macros"
 version = "0.0.0"
-source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=27942d8e9f3a119ab6f51aa1ee01c7872f841dd7#27942d8e9f3a119ab6f51aa1ee01c7872f841dd7"
+source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=8e93ba270fe1fa51208452f6ae423070a4f6bd81#8e93ba270fe1fa51208452f6ae423070a4f6bd81"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1554,15 +1554,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]
