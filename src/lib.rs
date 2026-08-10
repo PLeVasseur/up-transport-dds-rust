@@ -31,9 +31,8 @@ use dust_dds::infrastructure::type_support::DdsType;
 use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use up_rust::{
-    try_project_attributes_to_frame_metadata, try_project_frame_to_umessage,
     verify_filter_criteria, ProtobufMappable as _, UAttributes, UCode, UListener, UMessage,
-    UStatus, UTransport, UUri,
+    UOwnedFrame, UStatus, UTransport, UUri,
 };
 
 use crate::runtime::{
@@ -263,12 +262,20 @@ fn decode_classic(sample: UpDdsClassicSampleV1) -> Result<UMessage, String> {
     }
     let attributes = UAttributes::parse_from_protobuf_bytes(&sample.attributes_proto)
         .map_err(|error| format!("invalid classic attributes: {error}"))?;
-    let metadata = try_project_attributes_to_frame_metadata(&attributes, None)
-        .map_err(|error| format!("invalid classic metadata: {error}"))?;
+    let metadata = if sample.has_payload {
+        let encoding = attributes
+            .payload_encoding()
+            .ok_or_else(|| "classic payload has no encoding".to_owned())?;
+        attributes.to_frame_metadata(encoding)
+    } else {
+        attributes.to_frame_metadata_unencoded()
+    }
+    .map_err(|error| format!("invalid classic metadata: {error}"))?;
     let payload = sample
         .has_payload
         .then(|| bytes::Bytes::from(sample.payload));
-    try_project_frame_to_umessage(metadata, payload)
+    UOwnedFrame::new(metadata, payload)
+        .and_then(|frame| frame.to_umessage())
         .map_err(|error| format!("invalid classic message: {error}"))
 }
 

@@ -21,11 +21,10 @@ use dust_dds::infrastructure::status::NO_STATUS;
 use dust_dds::infrastructure::type_support::DdsType;
 use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
-use up_rust::transport_implementer_api::{
-    PreparedTxLoanSpec, UEncodedRxFrame, UEncodedZeroCopyListener, UZeroCopyTransportCore,
-    UZeroCopyUninitTransportCore,
+use up_rust::{
+    PreparedTxLoanSpec, UCode, UEncodedRxFrame, UEncodedZeroCopyListener, UFrameMetadata, UStatus,
+    UTxBuffer, UUninitTxBuffer, UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
 };
-use up_rust::{UCode, UFrameMetadata, UStatus, UTxBuffer, UUninitTxBuffer, UUri};
 
 use crate::runtime::{
     dds_status, join_worker, reader_qos, run_callback, start_dispatcher, submit, wait_until,
@@ -98,15 +97,11 @@ impl UUninitTxBuffer for DdsUninitTxBuffer {
         &self.metadata
     }
 
-    fn payload_len(&self) -> usize {
-        self.payload.len()
-    }
-
     fn payload_uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         self.payload.as_uninit_mut_slice()
     }
 
-    unsafe fn assume_payload_init(self) -> Self::Initialized {
+    unsafe fn assume_payload_initialized(self) -> Self::Initialized {
         DdsTxBuffer {
             metadata: self.metadata,
             source_uri: self.source_uri,

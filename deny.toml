@@ -22,12 +22,7 @@ allow = [
 [[licenses.clarify]]
 crate = "up-wire-xcdrv2@0.0.0"
 expression = "Apache-2.0"
-license-files = [{ path = "src/lib.rs", hash = 0x81ed8fac }]
-
-[[licenses.clarify]]
-crate = "up-wire-xcdrv2-macros@0.0.0"
-expression = "Apache-2.0"
-license-files = [{ path = "src/lib.rs", hash = 0x4b30d771 }]
+license-files = [{ path = "src/lib.rs", hash = 0x81cee17d }]
 
 [bans]
 multiple-versions = "warn"

@@ -13,13 +13,12 @@ use dust_dds::infrastructure::status::NO_STATUS;
 use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use tokio::sync::{mpsc, Mutex, Notify};
-use up_rust::selected_wire_user_api::UWithNativePrefixWire as _;
-use up_rust::transport_implementer_api::{UEncodedRxFrame, UEncodedZeroCopyListener};
 use up_rust::{
-    try_project_umessage_to_frame_metadata, EncodePayload, PayloadEncoding, PayloadFormat, UCode,
-    UFrameMetadata, UFrameView, UListener, UMessage, UMessageBuilder, UOwnedFrame, UOwnedListener,
-    UOwnedTransport, UPayloadFormat, UTransport, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri,
-    UZeroCopyListener, UZeroCopyRxLease, UZeroCopyTransport,
+    verify_filter_criteria, EncodePayload, PayloadCodecIdentity, PayloadEncoding, UCode,
+    UEncodedRxFrame, UEncodedZeroCopyListener, UFrameMetadata, UFrameView, UListener, UMessage,
+    UMessageBuilder, UOwnedFrame, UOwnedListener, UOwnedTransport, UTransport, UTxBuffer,
+    UTxLoanSpec, UUninitTxBuffer, UUri, UWithNativePrefixWire as _, UZeroCopyListener,
+    UZeroCopyRxLease, UZeroCopyTransportImpl,
 };
 use up_transport_dds::owned::{
     UPTransportDdsOwned, UpDdsOwnedSampleV1, OWNED_TOPIC_V1, OWNED_TYPE_V1,
@@ -43,12 +42,15 @@ fn metadata(source: &UUri, encoding: Option<PayloadEncoding>) -> UFrameMetadata 
     let message = UMessageBuilder::publish(source.clone())
         .build()
         .expect("message");
-    let metadata = try_project_umessage_to_frame_metadata(&message).expect("metadata");
     match encoding {
-        Some(encoding) => metadata
-            .with_payload_encoding(encoding)
+        Some(encoding) => message
+            .attributes()
+            .to_frame_metadata(encoding)
             .expect("payload encoding"),
-        None => metadata,
+        None => message
+            .attributes()
+            .to_frame_metadata_unencoded()
+            .expect("metadata"),
     }
 }
 
@@ -130,10 +132,10 @@ async fn classic_distinct_instances_preserve_payload_presence_and_suppress_self(
             .build()
             .expect("absent"),
         UMessageBuilder::publish(source.clone())
-            .build_with_payload(Vec::<u8>::new(), UPayloadFormat::Raw)
+            .build_with_payload(Vec::<u8>::new(), PayloadEncoding::RAW)
             .expect("empty"),
         UMessageBuilder::publish(source)
-            .build_with_payload(b"nonempty".to_vec(), UPayloadFormat::Raw)
+            .build_with_payload(b"nonempty".to_vec(), PayloadEncoding::RAW)
             .expect("nonempty"),
     ];
     for message in messages {
@@ -172,7 +174,7 @@ async fn all_families_validate_filters_and_none_requires_no_sink() {
         .register_listener(&invalid, None, Arc::new(MessageChannel(tx)))
         .await
         .expect_err("invalid filter must fail");
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 
     let owned = UPTransportDdsOwned::new(172, tokio::runtime::Handle::current()).expect("owned");
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -180,17 +182,11 @@ async fn all_families_validate_filters_and_none_requires_no_sink() {
         .register_owned_listener(&invalid, None, Arc::new(OwnedChannel(tx)))
         .await
         .expect_err("invalid owned filter must fail");
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 
-    let zero_copy = DdsZeroCopyCore::new(172, tokio::runtime::Handle::current())
-        .expect("zero-copy")
-        .into_native_prefix_wire_transport(up_rust::ProtobufWire);
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let error = zero_copy
-        .register_zero_copy_listener(&invalid, None, Arc::new(FrameChannel(tx)))
-        .await
-        .expect_err("invalid zero-copy filter must fail");
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    let error = verify_filter_criteria(&invalid, None)
+        .expect_err("invalid zero-copy implementer-boundary filter must fail validation");
+    assert_eq!(error.code(), UCode::InvalidArgument);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -307,7 +303,7 @@ async fn owned_distinct_instances_preserve_absent_empty_and_nonempty() {
 }
 
 macro_rules! selected_wire_round_trip {
-    ($name:ident, $domain:expr, $tag:expr, $wire:expr, $wire_ty:ty, $value:expr, $value_ty:ty) => {
+    ($name:ident, $domain:expr, $tag:expr, $wire:expr, $wire_ty:ty, $value:expr, $value_ty:ty, $decode_limit:expr) => {
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn $name() {
             let _test_guard = DDS_TEST_LOCK.lock().await;
@@ -324,7 +320,7 @@ macro_rules! selected_wire_round_trip {
             let receiver = receiver_core.into_native_prefix_wire_transport($wire);
             let (tx, mut rx) = mpsc::unbounded_channel();
             receiver
-                .register_zero_copy_listener(&source, None, Arc::new(FrameChannel(tx)))
+                .register_validated_zero_copy_listener(&source, None, Arc::new(FrameChannel(tx)))
                 .await
                 .expect("register");
 
@@ -332,9 +328,12 @@ macro_rules! selected_wire_round_trip {
             let layout = <$wire_ty as EncodePayload<$value_ty>>::payload_layout(&value)
                 .expect("payload layout");
             let mut loan = sender
-                .loan_tx(
+                .loan_validated_tx(
                     UTxLoanSpec::payload(
-                        metadata(&source, Some(<$wire_ty as PayloadFormat>::encoding())),
+                        metadata(
+                            &source,
+                            Some(<$wire_ty as PayloadCodecIdentity>::encoding()),
+                        ),
                         layout.len(),
                         layout.align(),
                     )
@@ -344,12 +343,12 @@ macro_rules! selected_wire_round_trip {
                 .expect("loan");
             <$wire_ty as EncodePayload<$value_ty>>::encode_payload(&value, loan.payload_mut())
                 .expect("encode");
-            sender.send_zero_copy(loan).await.expect("send");
+            sender.send_validated_zero_copy(loan).await.expect("send");
             let frame = tokio::time::timeout(WAIT, rx.recv())
                 .await
                 .expect("timeout")
                 .expect("frame");
-            let decoded: $value_ty = frame.decode_payload().expect("decode");
+            let decoded: $value_ty = frame.decode_payload($decode_limit).expect("decode");
             assert_eq!(decoded, value);
         }
     };
@@ -362,7 +361,8 @@ selected_wire_round_trip!(
     up_wire_xcdrv2::XcdrV2Wire,
     up_wire_xcdrv2::XcdrV2Wire,
     up_wire_xcdrv2::VEHICLE_SIGNAL_V1_GOLDEN_VALUE,
-    up_wire_xcdrv2::VehicleSignalV1
+    up_wire_xcdrv2::VehicleSignalV1,
+    up_wire_xcdrv2::VEHICLE_SIGNAL_V1_DECODE_LIMIT
 );
 
 selected_wire_round_trip!(
@@ -372,7 +372,8 @@ selected_wire_round_trip!(
     up_wire_arrow::ArrowWire,
     up_wire_arrow::ArrowWire,
     up_wire_arrow::TelemetryTableV1::fixture(64, 7),
-    up_wire_arrow::TelemetryTableV1
+    up_wire_arrow::TelemetryTableV1,
+    up_wire_arrow::ARROW_IPC_DECODE_LIMIT
 );
 
 selected_wire_round_trip!(
@@ -382,13 +383,13 @@ selected_wire_round_trip!(
     up_wire_omgidl::OmgIdlWire,
     up_wire_omgidl::OmgIdlWire,
     up_wire_omgidl::VehicleStatusV1::fixture(42),
-    up_wire_omgidl::VehicleStatusV1
+    up_wire_omgidl::VehicleStatusV1,
+    up_wire_omgidl::OMG_IDL_DECODE_LIMIT
 );
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialized_and_uninitialized_loans_honor_requested_alignment() {
-    use up_rust::transport_implementer_api::{PreparedTxLoanSpec, UZeroCopyTransportCore};
-    use up_rust::UZeroCopyUninitTransportCore;
+    use up_rust::{PreparedTxLoanSpec, UZeroCopyTransportCore, UZeroCopyUninitTransportCore};
 
     let _test_guard = DDS_TEST_LOCK.lock().await;
 
@@ -420,7 +421,7 @@ async fn initialized_and_uninitialized_loans_honor_requested_alignment() {
             byte.write(0xA5);
         }
         // SAFETY: every byte in the visible payload range was initialized above.
-        let initialized = unsafe { uninitialized.assume_payload_init() };
+        let initialized = unsafe { uninitialized.assume_payload_initialized() };
         assert!(initialized.payload().iter().all(|byte| *byte == 0xA5));
     }
 }
@@ -437,7 +438,7 @@ async fn selected_wire_mismatch_is_rejected_before_user_callback() {
     let receiver = receiver_core.into_native_prefix_wire_transport(up_wire_arrow::ArrowWire);
     let (tx, mut rx) = mpsc::unbounded_channel();
     receiver
-        .register_zero_copy_listener(&source, None, Arc::new(FrameChannel(tx)))
+        .register_validated_zero_copy_listener(&source, None, Arc::new(FrameChannel(tx)))
         .await
         .expect("register");
 
@@ -447,7 +448,7 @@ async fn selected_wire_mismatch_is_rejected_before_user_callback() {
     >>::payload_layout(&value)
     .expect("layout");
     let mut loan = sender
-        .loan_tx(
+        .loan_validated_tx(
             UTxLoanSpec::payload(
                 metadata(&source, Some(up_wire_xcdrv2::XcdrV2Wire::encoding())),
                 layout.len(),
@@ -462,7 +463,7 @@ async fn selected_wire_mismatch_is_rejected_before_user_callback() {
         loan.payload_mut(),
     )
     .expect("encode");
-    sender.send_zero_copy(loan).await.expect("send");
+    sender.send_validated_zero_copy(loan).await.expect("send");
     assert!(tokio::time::timeout(Duration::from_millis(500), rx.recv())
         .await
         .is_err());
@@ -480,33 +481,40 @@ async fn zero_copy_preserves_absent_empty_and_nonempty_payloads() {
     let receiver = receiver_core.into_native_prefix_wire_transport(up_rust::ProtobufWire);
     let (tx, mut rx) = mpsc::unbounded_channel();
     receiver
-        .register_zero_copy_listener(&source, None, Arc::new(FrameChannel(tx)))
+        .register_validated_zero_copy_listener(&source, None, Arc::new(FrameChannel(tx)))
         .await
         .expect("register");
     let (self_tx, mut self_rx) = mpsc::unbounded_channel();
     sender
-        .register_zero_copy_listener(&source, None, Arc::new(FrameChannel(self_tx)))
+        .register_validated_zero_copy_listener(&source, None, Arc::new(FrameChannel(self_tx)))
         .await
         .expect("self register");
 
     let absent = sender
-        .loan_tx(UTxLoanSpec::no_payload(metadata(&source, None)).expect("absent spec"))
+        .loan_validated_tx(UTxLoanSpec::no_payload(metadata(&source, None)).expect("absent spec"))
         .await
         .expect("absent loan");
-    sender.send_zero_copy(absent).await.expect("send absent");
+    sender
+        .send_validated_zero_copy(absent)
+        .await
+        .expect("send absent");
     let empty = sender
-        .loan_tx(
-            UTxLoanSpec::present_empty_payload(metadata(
-                &source,
-                Some(up_rust::ProtobufWire::encoding()),
-            ))
+        .loan_validated_tx(
+            UTxLoanSpec::payload(
+                metadata(&source, Some(up_rust::ProtobufWire::encoding())),
+                0,
+                1,
+            )
             .expect("empty spec"),
         )
         .await
         .expect("empty loan");
-    sender.send_zero_copy(empty).await.expect("send empty");
+    sender
+        .send_validated_zero_copy(empty)
+        .await
+        .expect("send empty");
     let mut nonempty = sender
-        .loan_tx(
+        .loan_validated_tx(
             UTxLoanSpec::payload(
                 metadata(&source, Some(up_rust::ProtobufWire::encoding())),
                 3,
@@ -518,7 +526,7 @@ async fn zero_copy_preserves_absent_empty_and_nonempty_payloads() {
         .expect("nonempty loan");
     nonempty.payload_mut().copy_from_slice(b"abc");
     sender
-        .send_zero_copy(nonempty)
+        .send_validated_zero_copy(nonempty)
         .await
         .expect("send nonempty");
 
@@ -548,7 +556,7 @@ async fn zero_copy_preserves_absent_empty_and_nonempty_payloads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn zero_copy_core_carries_metadata_opaquely_and_routes_from_sideband() {
-    use up_rust::transport_implementer_api::{PreparedTxLoanSpec, UZeroCopyTransportCore};
+    use up_rust::{PreparedTxLoanSpec, UZeroCopyTransportCore};
 
     let _test_guard = DDS_TEST_LOCK.lock().await;
 

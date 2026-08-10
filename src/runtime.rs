@@ -549,10 +549,6 @@ impl AlignedBytes {
         unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.len) }
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.len
-    }
-
     pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: this owner has exclusive access to the allocated visible range.
         unsafe { std::slice::from_raw_parts_mut(self.pointer.as_ptr(), self.len) }

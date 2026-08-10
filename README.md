@@ -59,10 +59,10 @@ The standalone lock resolves one graph from these exact public revisions:
 
 | Dependency | Revision |
 | --- | --- |
-| up-rust | `31ee659aae9588fabfd99678730a8229a0cdc18c` |
-| XCDRv2 | `27a6451ac6f46b2f30cebb82b5f0ada04eb78146` |
-| Arrow | `0f064f049124f3dce9d2413fcb73cf05e87d8f35` |
-| OMGIDL | `280378616ade087340c89c5c65237ed14a32eaaf` |
+| up-rust | `7a82babfa7f94aed5b7aac1ac81babff20747bf2` |
+| XCDRv2 | `84cab0922b6727960d51682a6b48583110bbde61` |
+| Arrow | `7bae0a82fdc1f3d3aa93dfac415590668d6c03f4` |
+| OMGIDL | `3d49390b84492528a37e81e702c7a64cbd6f4f14` |
 
 All resolved Git sources use public HTTPS and no resolved package is a sibling
 path dependency. Arrow and OMGIDL are selected-wire

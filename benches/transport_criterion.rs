@@ -10,11 +10,10 @@
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use up_rust::selected_wire_user_api::UWithNativePrefixWire as _;
 use up_rust::{
-    try_project_umessage_to_frame_metadata, EncodePayload, PayloadEncoding, PayloadFormat,
-    UMessageBuilder, UOwnedFrame, UOwnedTransport, UPayloadFormat, UTransport, UTxBuffer,
-    UTxLoanSpec, UUri, UZeroCopyTransport,
+    EncodePayload, PayloadCodecIdentity, PayloadEncoding, UMessageBuilder, UOwnedFrame,
+    UOwnedTransport, UTransport, UTxBuffer, UTxLoanSpec, UUri, UWithNativePrefixWire as _,
+    UZeroCopyTransportImpl,
 };
 use up_transport_dds::owned::UPTransportDdsOwned;
 use up_transport_dds::zero_copy::DdsZeroCopyCore;
@@ -44,7 +43,7 @@ fn transport_benches(criterion: &mut Criterion) {
         .wait_ready(1, Duration::from_secs(8))
         .expect("classic discovery");
     let message = UMessageBuilder::publish(source())
-        .build_with_payload(vec![0xA5; 1024], UPayloadFormat::Raw)
+        .build_with_payload(vec![0xA5; 1024], PayloadEncoding::RAW)
         .expect("classic message");
     group.bench_function("classic_publish_1k", |bencher| {
         bencher.iter(|| {
@@ -59,14 +58,13 @@ fn transport_benches(criterion: &mut Criterion) {
     owned
         .wait_ready(1, Duration::from_secs(8))
         .expect("owned discovery");
-    let metadata = try_project_umessage_to_frame_metadata(
-        &UMessageBuilder::publish(source())
-            .build()
-            .expect("metadata message"),
-    )
-    .expect("frame metadata")
-    .with_payload_encoding(PayloadEncoding::RAW)
-    .expect("raw payload encoding");
+    let message = UMessageBuilder::publish(source())
+        .build()
+        .expect("metadata message");
+    let metadata = message
+        .attributes()
+        .to_frame_metadata(PayloadEncoding::RAW)
+        .expect("frame metadata");
     let frame = UOwnedFrame::with_payload(metadata, vec![0x5A; 1024]).expect("owned frame");
     group.bench_function("owned_encode_and_publish_1k", |bencher| {
         bencher.iter(|| {
@@ -86,19 +84,18 @@ fn transport_benches(criterion: &mut Criterion) {
             let value: $value_ty = $value;
             let layout = <$wire_ty as EncodePayload<$value_ty>>::payload_layout(&value)
                 .expect("payload layout");
-            let metadata = try_project_umessage_to_frame_metadata(
-                &UMessageBuilder::publish(source())
-                    .build()
-                    .expect("metadata message"),
-            )
-            .expect("frame metadata")
-            .with_payload_encoding(<$wire_ty as PayloadFormat>::encoding())
-            .expect("payload encoding");
+            let message = UMessageBuilder::publish(source())
+                .build()
+                .expect("metadata message");
+            let metadata = message
+                .attributes()
+                .to_frame_metadata(<$wire_ty as PayloadCodecIdentity>::encoding())
+                .expect("payload encoding");
             group.bench_function($name, |bencher| {
                 bencher.iter(|| {
                     runtime.block_on(async {
                         let mut loan = transport
-                            .loan_tx(
+                            .loan_validated_tx(
                                 UTxLoanSpec::payload(
                                     black_box(metadata.clone()),
                                     layout.len(),
@@ -114,7 +111,7 @@ fn transport_benches(criterion: &mut Criterion) {
                         )
                         .expect("payload encode");
                         transport
-                            .send_zero_copy(loan)
+                            .send_validated_zero_copy(loan)
                             .await
                             .expect("zero-copy publish");
                     });

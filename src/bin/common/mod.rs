@@ -6,12 +6,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
-use up_rust::selected_wire_user_api::UWithNativePrefixWire as _;
 use up_rust::{
-    try_project_umessage_to_frame_metadata, PayloadEncoding, PayloadFormat, UCode, UFrameMetadata,
-    UFrameView, UListener, UMessage, UMessageBuilder, UOwnedFrame, UOwnedListener, UOwnedTransport,
-    UStatus, UTransport, UTxBuffer, UTxLoanSpec, UUri, UZeroCopyListener, UZeroCopyRxLease,
-    UZeroCopyTransport,
+    verify_filter_criteria, NativePrefixFrameMetadataCodec, PayloadCodecIdentity, PayloadEncoding,
+    UCode, UFrameMetadata, UFrameView, UListener, UMessage, UMessageBuilder, UOwnedFrame,
+    UOwnedListener, UOwnedTransport, UStatus, UTransport, UTxBuffer, UTxLoanSpec, UUri, UWire,
+    UWireMetadataCodecFor, UWithNativePrefixWire as _, UZeroCopyListener, UZeroCopyRxLease,
+    UZeroCopyTransportImpl,
 };
 use up_transport_dds::owned::UPTransportDdsOwned;
 use up_transport_dds::zero_copy::DdsZeroCopyCore;
@@ -162,19 +162,19 @@ fn outbound_message(role: Role, args: &Args) -> Result<UMessage, UStatus> {
     let result = match role {
         Role::Publisher => {
             UMessageBuilder::publish(topic(&args.local_authority, args.topic_resource_id)?)
-                .build_with_payload_encoding(payload, encoding(args.encoding))
+                .build_with_payload(payload, encoding(args.encoding))
         }
         Role::Notifier => UMessageBuilder::notification(
             topic(&args.local_authority, args.topic_resource_id)?,
             endpoint(&args.peer_authority)?,
         )
-        .build_with_payload_encoding(payload, encoding(args.encoding)),
+        .build_with_payload(payload, encoding(args.encoding)),
         Role::Client => UMessageBuilder::request(
             method(&args.peer_authority, args.method_resource_id)?,
             endpoint(&args.local_authority)?,
             u32::try_from(args.timeout_ms).unwrap_or(u32::MAX),
         )
-        .build_with_payload_encoding(payload, encoding(args.encoding)),
+        .build_with_payload(payload, encoding(args.encoding)),
         Role::Subscriber | Role::Notifyee | Role::Server => {
             return Err(invalid("passive role has no outbound request"));
         }
@@ -219,7 +219,7 @@ fn response_message(request: &UMessage, args: &Args) -> Result<UMessage, UStatus
         .cloned()
         .ok_or_else(|| invalid("request has no sink"))?;
     UMessageBuilder::response(request.source().clone(), request_id, invoked_method)
-        .build_with_payload_encoding(
+        .build_with_payload(
             request
                 .payload()
                 .map_or_else(Vec::new, |bytes| bytes.to_vec()),
@@ -293,6 +293,7 @@ async fn run_owned(role: Role, args: &Args) -> Result<(), UStatus> {
     }
 
     let (source, sink) = filters(role, args)?;
+    verify_filter_criteria(&source, sink.as_ref()).map_err(|status| *status)?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     transport
         .register_owned_listener(&source, sink.as_ref(), Arc::new(OwnedListener(tx)))
@@ -322,8 +323,17 @@ async fn run_owned(role: Role, args: &Args) -> Result<(), UStatus> {
 }
 
 fn frame_from_message(message: &UMessage) -> Result<UOwnedFrame, UStatus> {
-    let metadata = try_project_umessage_to_frame_metadata(message)
-        .map_err(|error| invalid(format!("project frame metadata: {error}")))?;
+    let metadata = match message.payload() {
+        Some(_) => {
+            let encoding = message
+                .attributes()
+                .payload_encoding()
+                .ok_or_else(|| invalid("payload-bearing message has no encoding"))?;
+            message.to_frame_metadata(encoding)
+        }
+        None => message.to_frame_metadata_unencoded(),
+    }
+    .map_err(|error| invalid(format!("project frame metadata: {error}")))?;
     match message.payload() {
         Some(payload) => UOwnedFrame::with_payload(metadata, payload.to_vec()),
         None => UOwnedFrame::without_payload(metadata),
@@ -345,9 +355,8 @@ where
 
 async fn run_zero_copy<W>(role: Role, args: &Args, wire: W) -> Result<(), UStatus>
 where
-    W: up_rust::wire_implementer_api::UWire + Copy + Send + Sync + 'static,
-    up_rust::wire_implementer_api::NativePrefixFrameMetadataCodec:
-        up_rust::wire_implementer_api::UWireMetadataCodecFor<W>,
+    W: UWire + Copy + Send + Sync + 'static,
+    NativePrefixFrameMetadataCodec: UWireMetadataCodecFor<W>,
 {
     let core = DdsZeroCopyCore::with_config(config(args), tokio::runtime::Handle::current())?;
     let required_matches = usize::from(matches!(
@@ -370,7 +379,11 @@ where
     let (source, sink) = filters(role, args)?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     transport
-        .register_zero_copy_listener(&source, sink.as_ref(), Arc::new(ZeroCopyListener(tx)))
+        .register_validated_zero_copy_listener(
+            &source,
+            sink.as_ref(),
+            Arc::new(ZeroCopyListener(tx)),
+        )
         .await?;
     println!("READY listener_registered");
     if matches!(role, Role::Client) {
@@ -399,18 +412,18 @@ async fn send_zero_copy<T>(
     args: &Args,
 ) -> Result<(), UStatus>
 where
-    T: UZeroCopyTransport + Send + Sync + 'static,
+    T: UZeroCopyTransportImpl + Send + Sync + 'static,
     T::Tx: UTxBuffer,
 {
     let mut loan = transport
-        .loan_tx(UTxLoanSpec::payload(
+        .loan_validated_tx(UTxLoanSpec::payload(
             frame.metadata().clone(),
             frame.payload_bytes().len(),
             args.payload_alignment,
         )?)
         .await?;
     loan.payload_mut().copy_from_slice(frame.payload_bytes());
-    transport.send_zero_copy(loan).await
+    transport.send_validated_zero_copy(loan).await
 }
 
 async fn receive<T>(
