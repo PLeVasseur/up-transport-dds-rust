@@ -60,7 +60,7 @@ The standalone lock resolves one graph from these exact public revisions:
 | Dependency | Revision |
 | --- | --- |
 | up-rust | `7a82babfa7f94aed5b7aac1ac81babff20747bf2` |
-| XCDRv2 | `84cab0922b6727960d51682a6b48583110bbde61` |
+| XCDRv2 | `ce0c4ca12cdb44fafbd5aa5adc1fa8f26451e625` |
 | Arrow | `7bae0a82fdc1f3d3aa93dfac415590668d6c03f4` |
 | OMGIDL | `3d49390b84492528a37e81e702c7a64cbd6f4f14` |
 
