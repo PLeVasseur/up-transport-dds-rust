@@ -237,6 +237,18 @@ pub(crate) fn invalid(detail: impl Into<String>) -> UStatus {
     UStatus::fail_with_code(UCode::InvalidArgument, detail.into())
 }
 
+pub(crate) fn wait_acknowledged<T>(
+    writer: &dust_dds::publication::data_writer::DataWriter<T>,
+    timeout: Duration,
+) -> Result<(), UStatus> {
+    let seconds = i32::try_from(timeout.as_secs())
+        .map_err(|_| invalid("DDS acknowledgement timeout exceeds the representable duration"))?;
+    let timeout = dust_dds::infrastructure::time::Duration::new(seconds, timeout.subsec_nanos());
+    writer
+        .wait_for_acknowledgments(timeout)
+        .map_err(|error| dds_status("wait for delivery acknowledgements", error))
+}
+
 pub(crate) fn wait_until(
     mut current_matches: impl FnMut() -> Result<i32, DdsError>,
     required_matches: usize,

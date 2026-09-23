@@ -225,6 +225,22 @@ impl UPTransportDdsOwned {
         )
     }
 
+    /// Waits for prior writes to be acknowledged by matched reliable readers.
+    ///
+    /// Call after discovery and terminal sends before dropping the producer.
+    /// This does not wait for future readers or application-level processing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unrepresentable timeout, a DDS failure or timeout.
+    pub fn wait_acknowledged(&self, timeout: Duration) -> Result<(), UStatus> {
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| UStatus::fail_with_code(UCode::Unavailable, "transport is closed"))?;
+        crate::runtime::wait_acknowledged(writer, timeout)
+    }
+
     /// Returns a health handle that remains valid after shutdown.
     #[must_use]
     pub fn health(&self) -> DdsHealth {

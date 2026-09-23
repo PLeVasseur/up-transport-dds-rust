@@ -246,6 +246,7 @@ async fn run_classic(role: Role, args: &Args) -> Result<(), UStatus> {
         transport.wait_ready(2, timeout(args))?;
         let message = outbound_message(role, args)?;
         transport.send(message.clone()).await?;
+        transport.wait_acknowledged(timeout(args))?;
         print_sent(role, message.payload().map_or(0, |payload| payload.len()));
         return Ok(());
     }
@@ -265,6 +266,7 @@ async fn run_classic(role: Role, args: &Args) -> Result<(), UStatus> {
         transport.wait_ready(2, timeout(args))?;
         transport.send(response_message(&message, args)?).await?;
     }
+    transport.wait_acknowledged(timeout(args))?;
     print_observed(role, message.payload().map_or(0, |payload| payload.len()));
     Ok(())
 }
@@ -288,6 +290,7 @@ async fn run_owned(role: Role, args: &Args) -> Result<(), UStatus> {
         let frame = frame_from_message(&outbound_message(role, args)?)?;
         let len = frame.payload_bytes().len();
         transport.send_owned(frame).await?;
+        transport.wait_acknowledged(timeout(args))?;
         print_sent(role, len);
         return Ok(());
     }
@@ -318,6 +321,7 @@ async fn run_owned(role: Role, args: &Args) -> Result<(), UStatus> {
             )
             .await?;
     }
+    transport.wait_acknowledged(timeout(args))?;
     print_observed(role, frame.payload_bytes().len());
     Ok(())
 }
@@ -372,6 +376,7 @@ where
             args,
         )
         .await?;
+        transport.core().wait_acknowledged(timeout(args))?;
         print_sent(role, args.payload.len());
         return Ok(());
     }
@@ -402,6 +407,7 @@ where
                 .map_err(|error| invalid(format!("build copy-minimized response: {error}")))?;
         send_zero_copy(&transport, response, args).await?;
     }
+    transport.core().wait_acknowledged(timeout(args))?;
     print_observed(role, payload.len());
     Ok(())
 }

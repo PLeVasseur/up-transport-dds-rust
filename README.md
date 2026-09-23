@@ -21,6 +21,13 @@ Each instance suppresses only samples carrying its own origin. `wait_ready`
 uses DDS `PublicationMatchedStatus`; applications do not need retry sends to
 cover discovery.
 
+For reliable terminal sends, call `wait_acknowledged(timeout)` after writing and
+before dropping the producer. A successful write queues data; publication matching
+alone does not establish delivery completion. The bounded acknowledgement barrier
+waits for previously written samples at currently matched reliable readers, not
+future discovery or application callbacks. Best-effort writers return immediately.
+Transport send methods keep their existing local-write semantics.
+
 Background work is bounded and observable through `DdsHealth`. Dropping a
 transport wakes and joins its poller, cancels callback work, drains the bounded
 dispatcher, and deletes the participant's contained entities. Successful

@@ -165,6 +165,123 @@ async fn classic_distinct_instances_preserve_payload_presence_and_suppress_self(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_classic_write_survives_immediate_producer_drop() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(21);
+    let sender = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
+    let receiver = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_listener(&source, None, Arc::new(MessageChannel(tx)))
+        .await
+        .unwrap();
+    sender.wait_ready(2, WAIT).unwrap();
+    let message = UMessageBuilder::publish(source)
+        .build_with_payload(b"one reliable write".to_vec(), PayloadEncoding::RAW)
+        .unwrap();
+    sender.send(message).await.unwrap();
+    sender.wait_acknowledged(WAIT).unwrap();
+    assert_eq!(
+        sender
+            .wait_acknowledged(Duration::from_secs(1_u64 << 31))
+            .unwrap_err()
+            .code(),
+        UCode::InvalidArgument
+    );
+    drop(sender);
+    let delivered = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivered.payload().unwrap().as_ref(), b"one reliable write");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_owned_write_survives_immediate_producer_drop() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(22);
+    let sender = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
+    let receiver = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_owned_listener(&source, None, Arc::new(OwnedChannel(tx)))
+        .await
+        .unwrap();
+    sender.wait_ready(2, WAIT).unwrap();
+    sender
+        .send_owned(
+            UOwnedFrame::with_payload(
+                metadata(&source, Some(PayloadEncoding::RAW)),
+                b"one reliable owned write".to_vec(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    sender.wait_acknowledged(WAIT).unwrap();
+    assert_eq!(
+        sender
+            .wait_acknowledged(Duration::from_secs(1_u64 << 31))
+            .unwrap_err()
+            .code(),
+        UCode::InvalidArgument
+    );
+    drop(sender);
+    let delivered = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivered.payload_bytes(), b"one reliable owned write");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_copy_minimized_write_survives_immediate_producer_drop() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(23);
+    let sender = DdsZeroCopyCore::new(212, tokio::runtime::Handle::current())
+        .unwrap()
+        .into_protobuf_transport();
+    let receiver = DdsZeroCopyCore::new(212, tokio::runtime::Handle::current())
+        .unwrap()
+        .into_protobuf_transport();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_validated_zero_copy_listener(&source, None, Arc::new(FrameChannel(tx)))
+        .await
+        .unwrap();
+    sender.core().wait_ready(2, WAIT).unwrap();
+    let bytes = b"one reliable copy-minimized write";
+    let mut loan = sender
+        .loan_validated_tx(
+            UTxLoanSpec::payload(
+                metadata(&source, Some(PayloadEncoding::PROTOBUF)),
+                bytes.len(),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    loan.payload_mut().copy_from_slice(bytes);
+    sender.send_validated_zero_copy(loan).await.unwrap();
+    sender.core().wait_acknowledged(WAIT).unwrap();
+    assert_eq!(
+        sender
+            .core()
+            .wait_acknowledged(Duration::from_secs(1_u64 << 31))
+            .unwrap_err()
+            .code(),
+        UCode::InvalidArgument
+    );
+    drop(sender);
+    let delivered = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivered.try_contiguous_payload().unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_families_validate_filters_and_none_requires_no_sink() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
     let transport = UPTransportDds::new(172, tokio::runtime::Handle::current()).expect("transport");
