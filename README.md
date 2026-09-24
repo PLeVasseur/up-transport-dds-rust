@@ -1,17 +1,26 @@
 # up-transport-dds
 
 `up-transport-dds` is a standalone Rust 1.88 physical transport for Eclipse
-uProtocol using Dust DDS 0.15 discovery and RTPS. It provides three separately
+uProtocol using Dust DDS 0.16 discovery and RTPS. It provides three separately
 versioned carriage families:
 
 - `UPTransportDds`: classic `UMessage` carriage with explicit payload presence.
 - `UPTransportDdsOwned`: canonical validated owned-frame carriage.
-- `DdsZeroCopyCore`: behavioral zero-copy loans and immutable receive leases.
+- `DdsZeroCopyCore`: selected-wire/copy-minimized API adapter with owned storage.
 
-The third family is copy-minimized only at the uProtocol API boundary. Dust DDS
-0.15 does not expose native transmit loans, receive loans, shared memory, or an
-end-to-end no-copy path. DDS serialization, publication, receive, and sample
-take copy bytes. See `docs/wire-contract.md` for the exact contract.
+**The DDS path is not native zero-copy.** Its historical type name identifies the
+SDK's loan-style API family. TX uses aligned heap storage and copies it into an
+owned DDS sample. Dust DDS 0.16 serializes that sample and returns owned decoded
+samples on RX; it exposes no native TX/RX loan or shared-memory data-sharing API.
+The receive vectors are adopted into `Bytes` without another payload copy, and
+listener fanout shares that owned allocation. See `docs/wire-contract.md`.
+
+Genuine DDS zero-copy requires middleware writer/reader loans, data-sharing
+delivery and suitable plain, bounded types. The current v1 envelope's unbounded
+strings and sequences are not such a type. That capability would require a new
+carriage profile and Rust binding to a supporting middleware. Passing a
+`dds-copy-minimized` integration row proves API/routing behavior, not native
+zero-copy. Streamer bridge copying is a separate boundary as well.
 
 ## Configuration
 
@@ -66,16 +75,17 @@ The standalone lock resolves one graph from these exact public revisions:
 
 | Dependency | Revision |
 | --- | --- |
-| up-rust | `7a82babfa7f94aed5b7aac1ac81babff20747bf2` |
-| XCDRv2 | `ce0c4ca12cdb44fafbd5aa5adc1fa8f26451e625` |
-| Arrow | `7bae0a82fdc1f3d3aa93dfac415590668d6c03f4` |
-| OMGIDL | `3d49390b84492528a37e81e702c7a64cbd6f4f14` |
+| up-rust | `f531712c63d811d402bcf4425d6a6ec8c288a361` |
+| XCDRv2 | `0b9d776043c77f2d3f0911fdce3621fe86e6fdf1` |
+| Arrow | `4603d98f46bb4980305a1e710a1e663708eb1f57` |
+| OMGIDL | `e91b3cd2c023f5efacc91d3dbc3f2a9dc40aa5b2` |
 
 All resolved Git sources use public HTTPS and no resolved package is a sibling
 path dependency. Arrow and OMGIDL are selected-wire
 codecs, not physical transports. Their metadata and payload remain opaque in
 the copy-minimized DDS core; source and optional sink routing travel in
-validated outer sideband fields.
+structurally checked outer routing hints. The shared SDK adapter decodes metadata
+and applies the public source/sink filters; hints never override that metadata.
 
 ## Validation
 

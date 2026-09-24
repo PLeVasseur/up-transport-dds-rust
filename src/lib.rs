@@ -24,11 +24,11 @@ use async_trait::async_trait;
 use dust_dds::domain::domain_participant::DomainParticipant;
 use dust_dds::domain::domain_participant_factory::DomainParticipantFactory;
 use dust_dds::infrastructure::error::DdsError;
+use dust_dds::infrastructure::listener::NO_LISTENER;
 use dust_dds::infrastructure::qos::QosKind;
 use dust_dds::infrastructure::sample_info::{ANY_INSTANCE_STATE, ANY_SAMPLE_STATE, ANY_VIEW_STATE};
 use dust_dds::infrastructure::status::NO_STATUS;
 use dust_dds::infrastructure::type_support::DdsType;
-use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use up_rust::{
     verify_filter_criteria, ProtobufMappable as _, UAttributes, UCode, UListener, UMessage,
@@ -47,6 +47,7 @@ pub const CLASSIC_TYPE_V1: &str = "UpDdsClassicSampleV1";
 
 /// Normative classic-family outer sample.
 #[derive(Clone, Debug, DdsType)]
+#[dust_dds(extensibility = "final")]
 pub struct UpDdsClassicSampleV1 {
     /// Exact originating transport instance.
     pub origin_id: String,

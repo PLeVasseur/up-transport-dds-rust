@@ -8,9 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use dust_dds::domain::domain_participant::DomainParticipant;
 use dust_dds::domain::domain_participant_factory::DomainParticipantFactory;
+use dust_dds::infrastructure::listener::NO_LISTENER;
 use dust_dds::infrastructure::qos::QosKind;
 use dust_dds::infrastructure::status::NO_STATUS;
-use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use tokio::sync::{mpsc, Mutex, Notify};
 use up_rust::{
@@ -164,9 +164,19 @@ async fn classic_distinct_instances_preserve_payload_presence_and_suppress_self(
     );
 }
 
+fn trace_acknowledgement_if_requested() {
+    if let Ok(filter) = std::env::var("UP_DDS_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .try_init();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acknowledged_classic_write_survives_immediate_producer_drop() {
     let _guard = DDS_TEST_LOCK.lock().await;
+    trace_acknowledgement_if_requested();
     let source = topic(21);
     let sender = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
     let receiver = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
@@ -199,6 +209,7 @@ async fn acknowledged_classic_write_survives_immediate_producer_drop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acknowledged_owned_write_survives_immediate_producer_drop() {
     let _guard = DDS_TEST_LOCK.lock().await;
+    trace_acknowledgement_if_requested();
     let source = topic(22);
     let sender = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
     let receiver = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
@@ -229,7 +240,12 @@ async fn acknowledged_owned_write_survives_immediate_producer_drop() {
     drop(sender);
     let delivered = tokio::time::timeout(WAIT, rx.recv())
         .await
-        .unwrap()
+        .unwrap_or_else(|error| {
+            panic!(
+                "owned delivery after acknowledgement: {error}; receiver health: {:?}",
+                receiver.health().snapshot()
+            )
+        })
         .unwrap();
     assert_eq!(delivered.payload_bytes(), b"one reliable owned write");
 }
@@ -237,6 +253,7 @@ async fn acknowledged_owned_write_survives_immediate_producer_drop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acknowledged_copy_minimized_write_survives_immediate_producer_drop() {
     let _guard = DDS_TEST_LOCK.lock().await;
+    trace_acknowledgement_if_requested();
     let source = topic(23);
     let sender = DdsZeroCopyCore::new(212, tokio::runtime::Handle::current())
         .unwrap()
@@ -276,7 +293,12 @@ async fn acknowledged_copy_minimized_write_survives_immediate_producer_drop() {
     drop(sender);
     let delivered = tokio::time::timeout(WAIT, rx.recv())
         .await
-        .unwrap()
+        .unwrap_or_else(|error| {
+            panic!(
+                "copy-minimized delivery after acknowledgement: {error}; receiver health: {:?}",
+                receiver.core().health().snapshot()
+            )
+        })
         .unwrap();
     assert_eq!(delivered.try_contiguous_payload().unwrap(), bytes);
 }
@@ -745,6 +767,99 @@ async fn malformed_owned_sample_from_distinct_participant_is_observable() {
     DomainParticipantFactory::get_instance()
         .delete_participant(&participant)
         .expect("delete raw writer participant");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sideband_source_hint_cannot_override_decoded_public_source_filter() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    let physical = metadata(&topic(24), Some(PayloadEncoding::PROTOBUF));
+    let conflicting = metadata(&topic(25), Some(PayloadEncoding::PROTOBUF));
+    assert_advisory_routing_is_not_semantic_authority(214, physical, conflicting).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sideband_sink_hint_cannot_override_decoded_public_sink_filter() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    let physical = UFrameMetadata::notification(topic(26), endpoint("expected-sink"))
+        .with_payload_encoding(PayloadEncoding::PROTOBUF)
+        .build()
+        .unwrap();
+    let conflicting = UFrameMetadata::notification(topic(26), endpoint("different-sink"))
+        .with_payload_encoding(PayloadEncoding::PROTOBUF)
+        .build()
+        .unwrap();
+    assert_advisory_routing_is_not_semantic_authority(215, physical, conflicting).await;
+}
+
+async fn assert_advisory_routing_is_not_semantic_authority(
+    domain: i32,
+    physical: UFrameMetadata,
+    conflicting: UFrameMetadata,
+) {
+    use up_rust::{
+        NativePrefixFrameMetadataCodec, PreparedTxLoanSpec, ProtobufWire, UWire,
+        UWireMetadataCodec, UZeroCopyTransportCore,
+    };
+
+    let sender = DdsZeroCopyCore::new(domain, tokio::runtime::Handle::current()).unwrap();
+    let receiver = DdsZeroCopyCore::new(domain, tokio::runtime::Handle::current())
+        .unwrap()
+        .into_protobuf_transport();
+    let (exact_tx, mut exact_rx) = mpsc::unbounded_channel();
+    receiver
+        .register_validated_zero_copy_listener(
+            physical.source(),
+            physical.sink(),
+            Arc::new(FrameChannel(exact_tx)),
+        )
+        .await
+        .unwrap();
+    let (broad_tx, mut broad_rx) = mpsc::unbounded_channel();
+    let any_sink = physical.sink().map(|_| UUri::any());
+    receiver
+        .register_validated_zero_copy_listener(
+            &UUri::any(),
+            any_sink.as_ref(),
+            Arc::new(FrameChannel(broad_tx)),
+        )
+        .await
+        .unwrap();
+    sender.wait_ready(2, WAIT).unwrap();
+
+    // Deliberately make the raw core's advisory route disagree with the encoded
+    // source/sink. Both listeners are physical candidates, but the common SDK
+    // adapter must apply each public filter to decoded metadata, never the hint.
+    for (semantic, payload) in [(&conflicting, b"hint"), (&physical, b"good")] {
+        let encoded = NativePrefixFrameMetadataCodec
+            .encode_frame_metadata(ProtobufWire::metadata_context(), semantic)
+            .unwrap();
+        let spec = PreparedTxLoanSpec::from_encoded_parts(physical.clone(), encoded, 4, 1).unwrap();
+        let mut loan = sender.loan_prepared_tx(spec).await.unwrap();
+        loan.payload_mut().copy_from_slice(payload);
+        sender.send_prepared_zero_copy(loan).await.unwrap();
+    }
+    sender.wait_acknowledged(WAIT).unwrap();
+    let exact = tokio::time::timeout(WAIT, exact_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exact.try_contiguous_payload(), Some(b"good".as_slice()));
+    assert_eq!(exact.metadata(), &physical);
+    let broad_first = tokio::time::timeout(WAIT, broad_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        broad_first.try_contiguous_payload(),
+        Some(b"hint".as_slice())
+    );
+    assert_eq!(broad_first.metadata(), &conflicting);
+    let broad_second = tokio::time::timeout(WAIT, broad_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(broad_second.metadata(), &physical);
+    assert!(exact_rx.try_recv().is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
