@@ -28,15 +28,16 @@ include = [
 async-trait = "0.1.88"
 bytes = "1.11.1"
 clap = { version = "4.5.41", features = ["derive"] }
-dust_dds = "=0.15.0"
+dust_dds = "=0.16.0"
 tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "31ee659aae9588fabfd99678730a8229a0cdc18c", default-features = false, features = ["owned-frame-transport", "protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-uninit"] }
-up-wire-arrow = { version = "0.1.0", git = "https://github.com/PLeVasseur/up-wire-arrow-rust.git", rev = "0f064f049124f3dce9d2413fcb73cf05e87d8f35" }
-up-wire-omgidl = { version = "0.1.0", git = "https://github.com/PLeVasseur/up-wire-omgidl-rust.git", rev = "280378616ade087340c89c5c65237ed14a32eaaf" }
-up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "27a6451ac6f46b2f30cebb82b5f0ada04eb78146" }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "4c786f83fd03f22ba4e7a4e9af0846ae79ecf852", default-features = false, features = ["owned-frame-transport", "protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-transport"] }
+up-wire-arrow = { version = "0.1.0", git = "https://github.com/PLeVasseur/up-wire-arrow-rust.git", rev = "c1205767f542cfcbfaa4fc75218c23487e9af9c3" }
+up-wire-omgidl = { version = "0.1.0", git = "https://github.com/PLeVasseur/up-wire-omgidl-rust.git", rev = "253f7fee3603a6440850e9cd198a027b5fc3bd89" }
+up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "4887f808dd8d91e8d033ca13e10da4cce6e4a521" }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", default-features = false }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bench]]
 name = "transport_criterion"

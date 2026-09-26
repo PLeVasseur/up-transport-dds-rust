@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Behavioral zero-copy family over Dust DDS.
+//! Copy-minimized API adapter over owned Dust DDS samples.
 //!
 //! Transmit loans are exclusive transport-owned aligned heap allocations.
-//! Dust DDS 0.15 provides no native transmit loan, receive loan, or shared
-//! memory API, so commit and receive necessarily copy. No end-to-end no-copy
-//! claim is made.
+//! Dust DDS 0.16 accepts owned samples and returns owned taken samples; it exposes
+//! no native TX/RX loan or shared-memory data-sharing API. Serialization and
+//! deserialization still copy. Implementing the uProtocol loan-style API is not
+//! a claim of native DDS zero-copy or end-to-end no-copy delivery.
 
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -12,20 +13,20 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use dust_dds::domain::domain_participant::DomainParticipant;
 use dust_dds::domain::domain_participant_factory::DomainParticipantFactory;
 use dust_dds::infrastructure::error::DdsError;
+use dust_dds::infrastructure::listener::NO_LISTENER;
 use dust_dds::infrastructure::qos::QosKind;
 use dust_dds::infrastructure::sample_info::{ANY_INSTANCE_STATE, ANY_SAMPLE_STATE, ANY_VIEW_STATE};
 use dust_dds::infrastructure::status::NO_STATUS;
 use dust_dds::infrastructure::type_support::DdsType;
-use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
-use up_rust::transport_implementer_api::{
-    PreparedTxLoanSpec, UEncodedRxFrame, UEncodedZeroCopyListener, UZeroCopyTransportCore,
-    UZeroCopyUninitTransportCore,
+use up_rust::{
+    PreparedTxLoanSpec, UCode, UEncodedRxFrame, UEncodedZeroCopyListener, UFrameMetadata, UStatus,
+    UTxBuffer, UUninitTxBuffer, UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
 };
-use up_rust::{UCode, UFrameMetadata, UStatus, UTxBuffer, UUninitTxBuffer, UUri};
 
 use crate::runtime::{
     dds_status, join_worker, reader_qos, run_callback, start_dispatcher, submit, wait_until,
@@ -40,6 +41,7 @@ pub const ZERO_COPY_TYPE_V1: &str = "UpDdsZeroCopySampleV1";
 
 /// Normative behavioral zero-copy outer sample.
 #[derive(Clone, Debug, DdsType)]
+#[dust_dds(extensibility = "final")]
 pub struct UpDdsZeroCopySampleV1 {
     /// Exact originating transport instance.
     pub origin_id: String,
@@ -98,15 +100,11 @@ impl UUninitTxBuffer for DdsUninitTxBuffer {
         &self.metadata
     }
 
-    fn payload_len(&self) -> usize {
-        self.payload.len()
-    }
-
     fn payload_uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         self.payload.as_uninit_mut_slice()
     }
 
-    unsafe fn assume_payload_init(self) -> Self::Initialized {
+    unsafe fn assume_payload_initialized(self) -> Self::Initialized {
         DdsTxBuffer {
             metadata: self.metadata,
             source_uri: self.source_uri,
@@ -119,10 +117,21 @@ impl UUninitTxBuffer for DdsUninitTxBuffer {
 }
 
 /// Immutable receive lease backed by owned taken-sample storage.
+///
+/// The taken vectors are adopted without another payload copy. This is owned
+/// heap storage, not a middleware receive loan; encoded-loan provenance is not
+/// advertised by this binding:
+///
+/// ```compile_fail
+/// use up_rust::UEncodedLoanedRxFrame;
+/// use up_transport_dds::zero_copy::DdsRxFrame;
+/// fn requires_explicit_loan_provenance<T: UEncodedLoanedRxFrame>() {}
+/// requires_explicit_loan_provenance::<DdsRxFrame>();
+/// ```
 #[derive(Clone, Debug)]
 pub struct DdsRxFrame {
-    encoded_metadata: Arc<[u8]>,
-    payload: Arc<[u8]>,
+    encoded_metadata: Bytes,
+    payload: Bytes,
 }
 
 impl UEncodedRxFrame for DdsRxFrame {
@@ -158,7 +167,10 @@ impl UEncodedRxFrame for DdsRxFrame {
 
 type EncodedListener = dyn UEncodedZeroCopyListener<DdsRxFrame>;
 
-/// Behavioral zero-copy core over a versioned Dust DDS topic.
+/// Copy-minimized API core over a versioned Dust DDS topic and owned samples.
+///
+/// The historical name identifies the SDK trait family. It does not imply native
+/// DDS loans, shared-memory delivery or an end-to-end zero-copy path.
 pub struct DdsZeroCopyCore {
     config: DdsConfig,
     writer: Option<DataWriter<UpDdsZeroCopySampleV1>>,
@@ -345,6 +357,22 @@ impl DdsZeroCopyCore {
         )
     }
 
+    /// Waits for prior writes to be acknowledged by matched reliable readers.
+    ///
+    /// Call after discovery and terminal sends before dropping the producer.
+    /// This does not wait for future readers or application-level processing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unrepresentable timeout, a DDS failure or timeout.
+    pub fn wait_acknowledged(&self, timeout: Duration) -> Result<(), UStatus> {
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| UStatus::fail_with_code(UCode::Unavailable, "transport is closed"))?;
+        crate::runtime::wait_acknowledged(writer, timeout)
+    }
+
     /// Returns a health handle that remains valid after shutdown.
     #[must_use]
     pub fn health(&self) -> DdsHealth {
@@ -380,8 +408,8 @@ fn decode_zero_copy(
         .transpose()
         .map_err(|error| format!("invalid zero-copy sink URI: {error}"))?;
     let frame = DdsRxFrame {
-        encoded_metadata: Arc::from(sample.encoded_metadata),
-        payload: Arc::from(sample.payload),
+        encoded_metadata: Bytes::from(sample.encoded_metadata),
+        payload: Bytes::from(sample.payload),
     };
     Ok((source, sink, frame))
 }
@@ -515,6 +543,40 @@ impl Drop for DdsZeroCopyCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn taken_sample_allocations_are_reused_and_shared_without_an_extra_copy() {
+        let metadata = vec![1, 2, 3, 4];
+        let payload = b"owned DDS sample".to_vec();
+        let metadata_address = metadata.as_ptr();
+        let payload_address = payload.as_ptr();
+        let (_, _, frame) = decode_zero_copy(UpDdsZeroCopySampleV1 {
+            origin_id: "peer".to_owned(),
+            source_uri: "up://peer/10000/1/8001".to_owned(),
+            has_sink: false,
+            sink_uri: String::new(),
+            has_payload: true,
+            encoded_metadata: metadata,
+            payload,
+        })
+        .unwrap();
+        assert_eq!(frame.encoded_metadata().as_ptr(), metadata_address);
+        assert_eq!(
+            frame.try_contiguous_payload().unwrap().as_ptr(),
+            payload_address
+        );
+        let retained = frame.clone();
+        drop(frame);
+        assert_eq!(retained.encoded_metadata().as_ptr(), metadata_address);
+        assert_eq!(
+            retained.try_contiguous_payload().unwrap().as_ptr(),
+            payload_address
+        );
+        assert_eq!(
+            retained.try_contiguous_payload().unwrap(),
+            b"owned DDS sample"
+        );
+    }
 
     #[test]
     fn zero_copy_rejects_inconsistent_sideband_presence() {

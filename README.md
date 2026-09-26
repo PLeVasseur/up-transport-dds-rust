@@ -1,17 +1,26 @@
 # up-transport-dds
 
 `up-transport-dds` is a standalone Rust 1.88 physical transport for Eclipse
-uProtocol using Dust DDS 0.15 discovery and RTPS. It provides three separately
+uProtocol using Dust DDS 0.16 discovery and RTPS. It provides three separately
 versioned carriage families:
 
 - `UPTransportDds`: classic `UMessage` carriage with explicit payload presence.
 - `UPTransportDdsOwned`: canonical validated owned-frame carriage.
-- `DdsZeroCopyCore`: behavioral zero-copy loans and immutable receive leases.
+- `DdsZeroCopyCore`: selected-wire/copy-minimized API adapter with owned storage.
 
-The third family is copy-minimized only at the uProtocol API boundary. Dust DDS
-0.15 does not expose native transmit loans, receive loans, shared memory, or an
-end-to-end no-copy path. DDS serialization, publication, receive, and sample
-take copy bytes. See `docs/wire-contract.md` for the exact contract.
+**The DDS path is not native zero-copy.** Its historical type name identifies the
+SDK's loan-style API family. TX uses aligned heap storage and copies it into an
+owned DDS sample. Dust DDS 0.16 serializes that sample and returns owned decoded
+samples on RX; it exposes no native TX/RX loan or shared-memory data-sharing API.
+The receive vectors are adopted into `Bytes` without another payload copy, and
+listener fanout shares that owned allocation. See `docs/wire-contract.md`.
+
+Genuine DDS zero-copy requires middleware writer/reader loans, data-sharing
+delivery and suitable plain, bounded types. The current v1 envelope's unbounded
+strings and sequences are not such a type. That capability would require a new
+carriage profile and Rust binding to a supporting middleware. Passing a
+`dds-copy-minimized` integration row proves API/routing behavior, not native
+zero-copy. Streamer bridge copying is a separate boundary as well.
 
 ## Configuration
 
@@ -20,6 +29,13 @@ depth, polling interval, per-take limit, and bounded callback queue explicit.
 Each instance suppresses only samples carrying its own origin. `wait_ready`
 uses DDS `PublicationMatchedStatus`; applications do not need retry sends to
 cover discovery.
+
+For reliable terminal sends, call `wait_acknowledged(timeout)` after writing and
+before dropping the producer. A successful write queues data; publication matching
+alone does not establish delivery completion. The bounded acknowledgement barrier
+waits for previously written samples at currently matched reliable readers, not
+future discovery or application callbacks. Best-effort writers return immediately.
+Transport send methods keep their existing local-write semantics.
 
 Background work is bounded and observable through `DdsHealth`. Dropping a
 transport wakes and joins its poller, cancels callback work, drains the bounded
@@ -59,16 +75,17 @@ The standalone lock resolves one graph from these exact public revisions:
 
 | Dependency | Revision |
 | --- | --- |
-| up-rust | `31ee659aae9588fabfd99678730a8229a0cdc18c` |
-| XCDRv2 | `27a6451ac6f46b2f30cebb82b5f0ada04eb78146` |
-| Arrow | `0f064f049124f3dce9d2413fcb73cf05e87d8f35` |
-| OMGIDL | `280378616ade087340c89c5c65237ed14a32eaaf` |
+| up-rust | `d7f50d06ecdbd3f6631745e2514727bc422498a2` |
+| XCDRv2 | `d5dababaaa6cc842f4b56b6ba897cf833128e42b` |
+| Arrow | `e382a5500fce88fbc049dbef58afa28f9bb64fcf` |
+| OMGIDL | `c8dd23ee886b0f65ed645528f492a828b2d90bd4` |
 
 All resolved Git sources use public HTTPS and no resolved package is a sibling
 path dependency. Arrow and OMGIDL are selected-wire
 codecs, not physical transports. Their metadata and payload remain opaque in
 the copy-minimized DDS core; source and optional sink routing travel in
-validated outer sideband fields.
+structurally checked outer routing hints. The shared SDK adapter decodes metadata
+and applies the public source/sink filters; hints never override that metadata.
 
 ## Validation
 
