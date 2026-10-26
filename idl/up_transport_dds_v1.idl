@@ -4,6 +4,7 @@
 module uprotocol {
   module transport {
     module dds {
+      @extensibility(FINAL)
       struct ClassicSampleV1 {
         string origin_id;
         sequence<octet> attributes_proto;
@@ -11,6 +12,7 @@ module uprotocol {
         sequence<octet> payload;
       };
 
+      @extensibility(FINAL)
       struct OwnedSampleV1 {
         string origin_id;
         sequence<octet> metadata_fields;
@@ -18,7 +20,8 @@ module uprotocol {
         sequence<octet> payload;
       };
 
-      struct ZeroCopySampleV1 {
+      @extensibility(FINAL)
+      struct EncodedOwnedSampleV1 {
         string origin_id;
         string source_uri;
         boolean has_sink;

@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::collections::VecDeque;
 use std::future::Future;
-use std::mem::MaybeUninit;
-use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
@@ -46,7 +43,7 @@ impl Default for DdsQos {
     }
 }
 
-/// Runtime configuration shared by classic, owned, and zero-copy families.
+/// Runtime configuration shared by classic, owned, and encoded-owned families.
 #[derive(Clone, Debug)]
 pub struct DdsConfig {
     /// DDS domain ID.
@@ -235,6 +232,18 @@ pub(crate) fn dds_status(context: &str, error: DdsError) -> UStatus {
 
 pub(crate) fn invalid(detail: impl Into<String>) -> UStatus {
     UStatus::fail_with_code(UCode::InvalidArgument, detail.into())
+}
+
+pub(crate) fn wait_acknowledged<T>(
+    writer: &dust_dds::publication::data_writer::DataWriter<T>,
+    timeout: Duration,
+) -> Result<(), UStatus> {
+    let seconds = i32::try_from(timeout.as_secs())
+        .map_err(|_| invalid("DDS acknowledgement timeout exceeds the representable duration"))?;
+    let timeout = dust_dds::infrastructure::time::Duration::new(seconds, timeout.subsec_nanos());
+    writer
+        .wait_for_acknowledgments(timeout)
+        .map_err(|error| dds_status("wait for delivery acknowledgements", error))
 }
 
 pub(crate) fn wait_until(
@@ -501,79 +510,6 @@ pub(crate) fn join_worker(worker: Option<JoinHandle<()>>, name: &str, health: &D
             HealthErrorKind::WorkerPanic,
             format!("{name} thread panicked"),
         );
-    }
-}
-
-/// Heap allocation whose visible byte range honors an arbitrary valid alignment.
-pub(crate) struct AlignedBytes {
-    pointer: NonNull<u8>,
-    layout: Layout,
-    len: usize,
-}
-
-// SAFETY: the allocation is uniquely owned and exposes only slices governed by
-// Rust's borrowing rules. Moving the owner does not move its allocation.
-unsafe impl Send for AlignedBytes {}
-
-impl AlignedBytes {
-    pub(crate) fn zeroed(len: usize, alignment: usize) -> Result<Self, UStatus> {
-        Self::allocate(len, alignment, true)
-    }
-
-    pub(crate) fn uninitialized(len: usize, alignment: usize) -> Result<Self, UStatus> {
-        Self::allocate(len, alignment, false)
-    }
-
-    fn allocate(len: usize, alignment: usize, zeroed: bool) -> Result<Self, UStatus> {
-        let layout = Layout::from_size_align(len.max(1), alignment)
-            .map_err(|_| invalid("invalid requested payload allocation layout"))?;
-        // SAFETY: `layout` is valid and the returned pointer is checked.
-        let raw = unsafe {
-            if zeroed {
-                alloc_zeroed(layout)
-            } else {
-                alloc(layout)
-            }
-        };
-        let pointer = NonNull::new(raw).unwrap_or_else(|| handle_alloc_error(layout));
-        Ok(Self {
-            pointer,
-            layout,
-            len,
-        })
-    }
-
-    pub(crate) fn as_slice(&self) -> &[u8] {
-        // SAFETY: the initialized constructor or the up-rust witness guarantees
-        // initialization before this method is reachable on an initialized loan.
-        unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.len) }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.len
-    }
-
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: this owner has exclusive access to the allocated visible range.
-        unsafe { std::slice::from_raw_parts_mut(self.pointer.as_ptr(), self.len) }
-    }
-
-    pub(crate) fn as_uninit_mut_slice(&mut self) -> &mut [MaybeUninit<u8>] {
-        // SAFETY: `MaybeUninit<u8>` has the same layout as `u8`, and this owner
-        // has exclusive access to the allocated visible range.
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                self.pointer.as_ptr().cast::<MaybeUninit<u8>>(),
-                self.len,
-            )
-        }
-    }
-}
-
-impl Drop for AlignedBytes {
-    fn drop(&mut self) {
-        // SAFETY: `pointer` was allocated with this exact layout and is owned here.
-        unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
 

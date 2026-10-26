@@ -9,16 +9,14 @@ use async_trait::async_trait;
 use dust_dds::domain::domain_participant::DomainParticipant;
 use dust_dds::domain::domain_participant_factory::DomainParticipantFactory;
 use dust_dds::infrastructure::error::DdsError;
+use dust_dds::infrastructure::listener::NO_LISTENER;
 use dust_dds::infrastructure::qos::QosKind;
 use dust_dds::infrastructure::sample_info::{ANY_INSTANCE_STATE, ANY_SAMPLE_STATE, ANY_VIEW_STATE};
 use dust_dds::infrastructure::status::NO_STATUS;
 use dust_dds::infrastructure::type_support::DdsType;
-use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use up_rust::frame::codec::{decode_frame_metadata_fields, encode_frame_metadata_fields};
-use up_rust::{
-    UCode, UOwnedFrame, UOwnedListener, UOwnedTransportImpl, UStatus, UUri, ValidatedOwnedFrame,
-};
+use up_rust::{UCode, UOwnedFrame, UOwnedListener, UOwnedTransportImpl, UStatus, UUri};
 
 use crate::runtime::{
     dds_status, join_worker, reader_qos, run_callback, start_dispatcher, submit, wait_until,
@@ -33,6 +31,7 @@ pub const OWNED_TYPE_V1: &str = "UpDdsOwnedSampleV1";
 
 /// Normative owned-family outer sample.
 #[derive(Clone, Debug, DdsType)]
+#[dust_dds(extensibility = "final")]
 pub struct UpDdsOwnedSampleV1 {
     /// Exact originating transport instance.
     pub origin_id: String,
@@ -227,6 +226,22 @@ impl UPTransportDdsOwned {
         )
     }
 
+    /// Waits for prior writes to be acknowledged by matched reliable readers.
+    ///
+    /// Call after discovery and terminal sends before dropping the producer.
+    /// This does not wait for future readers or application-level processing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unrepresentable timeout, a DDS failure or timeout.
+    pub fn wait_acknowledged(&self, timeout: Duration) -> Result<(), UStatus> {
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| UStatus::fail_with_code(UCode::Unavailable, "transport is closed"))?;
+        crate::runtime::wait_acknowledged(writer, timeout)
+    }
+
     /// Returns a health handle that remains valid after shutdown.
     #[must_use]
     pub fn health(&self) -> DdsHealth {
@@ -252,14 +267,12 @@ fn decode_owned(sample: UpDdsOwnedSampleV1) -> Result<UOwnedFrame, String> {
     let frame = UOwnedFrame::new_unchecked(metadata, payload);
     frame
         .validate()
-        .map_err(|error| format!("invalid owned frame: {error}"))?;
-    Ok(frame)
+        .map_err(|error| format!("invalid owned frame: {error}"))
 }
 
 #[async_trait]
 impl UOwnedTransportImpl for UPTransportDdsOwned {
-    async fn send_validated_owned(&self, frame: ValidatedOwnedFrame) -> Result<(), UStatus> {
-        let frame = frame.into_inner();
+    async fn send_validated_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
         let metadata_fields = encode_frame_metadata_fields(frame.metadata()).map_err(|error| {
             UStatus::fail_with_code(
                 UCode::InvalidArgument,

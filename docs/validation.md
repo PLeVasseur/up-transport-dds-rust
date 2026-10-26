@@ -14,8 +14,7 @@ cargo +1.95.0 package --locked --list
 cargo deny check
 ```
 
-Dust DDS 0.15 has no wait-set wake API on the synchronous reader used here.
-Pollers therefore call nonblocking `take`, then wait on a condition variable;
+The binding's synchronous reader pollers call nonblocking `take`, then wait on a condition variable;
 drop wakes that condition variable and joins the poller. Discovery readiness is
 the writer's DDS `PublicationMatchedStatus`, not a retry-send heuristic.
 
