@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use tokio::sync::mpsc;
 use up_rust::{
-    verify_filter_criteria, NativePrefixFrameMetadataCodec, PayloadCodecIdentity, PayloadEncoding,
-    UCode, UFrameMetadata, UListener, UMessage, UMessageBuilder, UOwnedFrame, UOwnedListener,
-    UOwnedTransport, UStatus, UTransport, UUri, UWire, UWireMetadataCodecFor,
+    verify_filter_criteria, PayloadCodecIdentity, PayloadEncoding, UCode,
+    UFrameFieldsMetadataCodec, UFrameMetadata, UListener, UMessage, UMessageBuilder, UOwnedFrame,
+    UOwnedListener, UOwnedTransport, UStatus, UTransport, UUri, UWire, UWireMetadataCodecFor,
     UWithNativePrefixWire as _,
 };
 use up_transport_dds::encoded_owned::DdsEncodedOwnedCore;
@@ -334,7 +334,7 @@ fn frame_from_message(message: &UMessage) -> Result<UOwnedFrame, UStatus> {
 async fn run_encoded_owned<W>(role: Role, args: &Args, wire: W) -> Result<(), UStatus>
 where
     W: UWire + Copy + Send + Sync + 'static,
-    NativePrefixFrameMetadataCodec: UWireMetadataCodecFor<W>,
+    UFrameFieldsMetadataCodec: UWireMetadataCodecFor<W>,
 {
     let core = DdsEncodedOwnedCore::with_config(config(args), tokio::runtime::Handle::current())?;
     let required_matches = usize::from(matches!(

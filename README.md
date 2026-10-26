@@ -19,6 +19,9 @@ capabilities. See the rendered, compile-tested [wire and capability guide](docs/
 Classic/owned reconstruction uses checked SDK projections and preserves the
 sample's payload-presence distinction. Selected-wire contexts take layout identity
 from the configured metadata codec; physical topic/type contracts stay unchanged.
+Selected-wire callers use the SDK's `UFrameFieldsMetadataCodec`. The prepared
+zero-copy core API remains a separate capability which this owned DDS core does
+not implement; the wire/capability guide and compile-time assertions cover it.
 
 Genuine DDS zero-copy requires middleware writer/reader loans, data-sharing
 delivery and suitable plain, bounded types. The current v1 envelope's unbounded

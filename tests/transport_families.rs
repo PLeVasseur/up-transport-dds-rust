@@ -29,7 +29,7 @@ use up_transport_dds::{DdsConfig, UPTransportDds};
 
 const WAIT: Duration = Duration::from_secs(8);
 static_assertions::assert_impl_all!(DdsEncodedOwnedCore: UOwnedTransportCore, Send, Sync);
-static_assertions::assert_not_impl_any!(DdsEncodedOwnedCore: up_rust::UZeroCopyTransportCore, up_rust::UZeroCopyUninitTransportCore);
+static_assertions::assert_not_impl_any!(DdsEncodedOwnedCore: up_rust::PreparedTransportCore);
 static DDS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn topic(tag: u16) -> UUri {
@@ -171,8 +171,8 @@ async fn acknowledged_classic_write_survives_immediate_producer_drop() {
     let _guard = DDS_TEST_LOCK.lock().await;
     trace_acknowledgement_if_requested();
     let source = topic(21);
-    let sender = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
-    let receiver = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
+    let sender = UPTransportDds::new(58, tokio::runtime::Handle::current()).unwrap();
+    let receiver = UPTransportDds::new(58, tokio::runtime::Handle::current()).unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
     receiver
         .register_listener(&source, None, Arc::new(MessageChannel(tx)))
@@ -204,8 +204,8 @@ async fn acknowledged_owned_write_survives_immediate_producer_drop() {
     let _guard = DDS_TEST_LOCK.lock().await;
     trace_acknowledgement_if_requested();
     let source = topic(22);
-    let sender = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
-    let receiver = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
+    let sender = UPTransportDdsOwned::new(59, tokio::runtime::Handle::current()).unwrap();
+    let receiver = UPTransportDdsOwned::new(59, tokio::runtime::Handle::current()).unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
     receiver
         .register_owned_listener(&source, None, Arc::new(OwnedChannel(tx)))
@@ -248,10 +248,10 @@ async fn acknowledged_encoded_owned_write_survives_immediate_producer_drop() {
     let _guard = DDS_TEST_LOCK.lock().await;
     trace_acknowledgement_if_requested();
     let source = topic(23);
-    let sender = DdsEncodedOwnedCore::new(212, tokio::runtime::Handle::current())
+    let sender = DdsEncodedOwnedCore::new(60, tokio::runtime::Handle::current())
         .unwrap()
         .into_protobuf_transport();
-    let receiver = DdsEncodedOwnedCore::new(212, tokio::runtime::Handle::current())
+    let receiver = DdsEncodedOwnedCore::new(60, tokio::runtime::Handle::current())
         .unwrap()
         .into_protobuf_transport();
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -750,7 +750,7 @@ async fn assert_advisory_routing_is_not_semantic_authority(
     physical: UFrameMetadata,
     conflicting: UFrameMetadata,
 ) {
-    use up_rust::{NativePrefixFrameMetadataCodec, ProtobufWire, UWireMetadataCodec};
+    use up_rust::{ProtobufWire, UFrameFieldsMetadataCodec, UWireMetadataCodec};
 
     let receiver = DdsEncodedOwnedCore::new(domain, tokio::runtime::Handle::current())
         .unwrap()
@@ -781,11 +781,11 @@ async fn assert_advisory_routing_is_not_semantic_authority(
     // source/sink. Both listeners are physical candidates, but the common SDK
     // adapter must apply each public filter to decoded metadata, never the hint.
     for (semantic, payload) in [(&conflicting, b"hint"), (&physical, b"good")] {
-        let encoded = NativePrefixFrameMetadataCodec
+        let encoded = UFrameFieldsMetadataCodec
             .encode_frame_metadata(
                 up_rust::UWireMetadataContext::from_wire::<
                     ProtobufWire,
-                    up_rust::NativePrefixFrameMetadataCodec,
+                    up_rust::UFrameFieldsMetadataCodec,
                 >(),
                 semantic,
             )

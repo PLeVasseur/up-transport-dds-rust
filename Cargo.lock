@@ -1457,9 +1457,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
  "pin-project-lite",
  "tokio-macros",
@@ -1553,7 +1553,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "up-rust"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=c9be9db4565b43f463734f3a335ea4902cb46a62#c9be9db4565b43f463734f3a335ea4902cb46a62"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=75a5dd25dac271161d4709a0559b788befa21b67#75a5dd25dac271161d4709a0559b788befa21b67"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1566,6 +1566,7 @@ dependencies = [
  "rand",
  "sha2",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "up-rust-macros",
  "uuid-simd",
@@ -1574,7 +1575,7 @@ dependencies = [
 [[package]]
 name = "up-rust-macros"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=c9be9db4565b43f463734f3a335ea4902cb46a62#c9be9db4565b43f463734f3a335ea4902cb46a62"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=75a5dd25dac271161d4709a0559b788befa21b67#75a5dd25dac271161d4709a0559b788befa21b67"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1602,7 +1603,7 @@ dependencies = [
 [[package]]
 name = "up-wire-arrow"
 version = "0.1.0"
-source = "git+https://github.com/PLeVasseur/up-wire-arrow-rust.git?rev=4474f349c2788e28b0f86796f10c02117372cee1#4474f349c2788e28b0f86796f10c02117372cee1"
+source = "git+https://github.com/PLeVasseur/up-wire-arrow-rust.git?rev=600864e0f2cc6a9f90bac6e17fdfcd8f6a39b7b6#600864e0f2cc6a9f90bac6e17fdfcd8f6a39b7b6"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -1615,7 +1616,7 @@ dependencies = [
 [[package]]
 name = "up-wire-omgidl"
 version = "0.1.0"
-source = "git+https://github.com/PLeVasseur/up-wire-omgidl-rust.git?rev=233d718b3fe8666577ce44359d6b336de4d838ec#233d718b3fe8666577ce44359d6b336de4d838ec"
+source = "git+https://github.com/PLeVasseur/up-wire-omgidl-rust.git?rev=d3d2c722332e114e1d2c535562923b78035f6c8c#d3d2c722332e114e1d2c535562923b78035f6c8c"
 dependencies = [
  "bytes",
  "dust_dds 0.15.0",
@@ -1624,8 +1625,8 @@ dependencies = [
 
 [[package]]
 name = "up-wire-xcdrv2"
-version = "0.0.0"
-source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=74bb7b08b0d3f1ffc966902e48376ffe0b7024bb#74bb7b08b0d3f1ffc966902e48376ffe0b7024bb"
+version = "0.1.0"
+source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=2eccbb9c50095d488e5586e0e82d12b5bceb2763#2eccbb9c50095d488e5586e0e82d12b5bceb2763"
 dependencies = [
  "up-rust",
  "up-wire-xcdrv2-macros",
@@ -1633,8 +1634,8 @@ dependencies = [
 
 [[package]]
 name = "up-wire-xcdrv2-macros"
-version = "0.0.0"
-source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=74bb7b08b0d3f1ffc966902e48376ffe0b7024bb#74bb7b08b0d3f1ffc966902e48376ffe0b7024bb"
+version = "0.1.0"
+source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=2eccbb9c50095d488e5586e0e82d12b5bceb2763#2eccbb9c50095d488e5586e0e82d12b5bceb2763"
 dependencies = [
  "proc-macro2",
  "quote",

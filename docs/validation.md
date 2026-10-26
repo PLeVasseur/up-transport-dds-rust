@@ -22,11 +22,12 @@ Dust DDS reports malformed RTPS/XTypes input as a reader error without exposing
 the rejected serialized bytes. Health therefore distinguishes invalid decoded
 outer samples from DDS receive failures, but cannot attach the original malformed
 network corpus to the latter.
-# Discovery-port placement for tests
+## Discovery-port placement for tests
 
-The transport-family suite uses domains41–57, whose builtin multicast discovery
-ports (`7400 + 250 * domain`) are17650–21650. Keep them outside the host's ephemeral
-UDP range: Dust DDS first binds unicast sockets to port0, then binds discovery's
+The transport-family suite uses domains 41–60, including acknowledgement/drop
+tests at 58–60. Their builtin multicast discovery ports (`7400 + 250 * domain`)
+are 17,650–22,400. Keep them outside the host's ephemeral
+UDP range: Dust DDS first binds unicast sockets to port 0, then binds discovery's
 fixed port. Domains in the ephemeral range can collide with those earlier binds.
 The suite serializes participant groups; use separate namespaces for simultaneous
 independent suite processes. These are test domains, not changes to CLI defaults.

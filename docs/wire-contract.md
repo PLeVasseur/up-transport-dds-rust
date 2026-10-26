@@ -22,6 +22,8 @@ sample's explicit payload presence when constructing the owned frame. Complete
 messages use the checked message projection. Neither path overrides a received
 encoding or conflates absent with present-empty data. Selected-wire metadata
 contexts combine wire/family identity with the configured codec's layout identity.
+The canonical SDK codec is `UFrameFieldsMetadataCodec`; changing its API name does
+not change the outer DDS topic, type or metadata bytes.
 
 | Family | Topic | Registered type |
 | --- | --- | --- |
@@ -44,9 +46,9 @@ classic and validated-owned retain their original v1 names and bytes.
 
 ## Capability and migration
 
-`DdsEncodedOwnedCore` implements `UOwnedTransportCore`, not either
-`UZeroCopyTransportCore` or `UZeroCopyUninitTransportCore`. Compile-time negative
-assertions pin that distinction. Dust DDS0.16.0's evaluated writer/reader path uses
+`DdsEncodedOwnedCore` implements `UOwnedTransportCore`. It does not implement
+`PreparedTransportCore`; a compile-time negative assertion pins that distinction.
+Dust DDS 0.16.0's evaluated writer/reader path uses
 owned samples and mandatory serialization. Native DDS sample-pool ownership,
 writer/reader loans, shared-memory data-sharing and their lifetime/allocation proof
 would be prerequisites for a separate future native capability.
