@@ -16,6 +16,13 @@ the shared selected-wire adapter validates it and applies the final public
 source/sink filter before delivery. A broad filter may receive a frame whose
 advisory hint differs, but its exposed metadata is always the decoded metadata.
 
+Classic reconstruction projects the received attributes' own optional encoding
+with `UAttributes::try_project_to_frame_metadata`, then checks it against the
+sample's explicit payload presence when constructing the owned frame. Complete
+messages use the checked message projection. Neither path overrides a received
+encoding or conflates absent with present-empty data. Selected-wire metadata
+contexts combine wire/family identity with the configured codec's layout identity.
+
 | Family | Topic | Registered type |
 | --- | --- | --- |
 | classic | `uprotocol.classic.v1` | `UpDdsClassicSampleV1` |
@@ -54,6 +61,13 @@ one topic would permit unintended direct delivery around a bridge.
 Historical `uprotocol.zero-copy.v1` / `UpDdsZeroCopySampleV1` traffic is not accepted
 on the new topic. Deployment peers must migrate together and configure the
 encoded-owned API explicitly.
+
+The standalone encoded-owned role binaries configure serialized wires. They reject
+`--encoding native` before DDS startup because their text payload has neither an
+explicit native-profile agreement nor a declared stable representation. Classic
+and owned-frame roles keep that option's raw-byte meaning. Direct SDK adapter users
+may supply an explicit agreement for opaque native bytes in owned storage; this
+is still encoded-owned DDS carriage, not a middleware-native loan.
 
 ```rust
 use up_rust::{UOwnedTransport, UStatus, UWithNativePrefixWire};

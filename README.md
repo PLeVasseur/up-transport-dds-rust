@@ -16,6 +16,9 @@ payload bytes into the middleware sample. Receive adopts the payload vector into
 `Bytes`; fanout shares payload storage and clones owned metadata. There are no
 initialized/uninitialized loan methods or compatibility aliases claiming those
 capabilities. See the rendered, compile-tested [wire and capability guide](docs/wire-contract.md).
+Classic/owned reconstruction uses checked SDK projections and preserves the
+sample's payload-presence distinction. Selected-wire contexts take layout identity
+from the configured metadata codec; physical topic/type contracts stay unchanged.
 
 Genuine DDS zero-copy requires middleware writer/reader loans, data-sharing
 delivery and suitable plain, bounded types. The current v1 envelope's unbounded
@@ -72,6 +75,12 @@ active role waits for the remote DDS reader and sends once.
 The old `copy-minimized` family and `--payload-alignment` loan setting are removed;
 unsupported old options fail explicitly. Encoded-owned uses its own DDS topic,
 not the validated-owned topic, so distinct physical families cannot bypass a bridge.
+`--encoding native` carries raw bytes in the classic and owned-frame role paths.
+The encoded-owned role path rejects that selection before creating a DDS endpoint:
+it has no explicit native-profile agreement or declared stable type for the text
+`--payload`. It does not synthesize a profile or fall back to another wire.
+Applications using the SDK adapter directly can supply an explicit native agreement
+for opaque owned carriage; that does not create a native DDS loan capability.
 
 ## Wire Dependencies
 

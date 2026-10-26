@@ -39,6 +39,7 @@ enum RouteFamily {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Encoding {
+    /// Raw bytes for classic/owned-frame roles; encoded-owned requires a native agreement.
     Native,
     Protobuf,
     Xcdrv2,
@@ -100,9 +101,7 @@ pub(crate) async fn run(role: Role) -> Result<(), UStatus> {
         RouteFamily::Classic => run_classic(role, &args).await,
         RouteFamily::OwnedFrame => run_owned(role, &args).await,
         RouteFamily::EncodedOwned => match args.encoding {
-            Encoding::Native => {
-                run_encoded_owned(role, &args, up_rust::StableContainerWireFormat).await
-            }
+            Encoding::Native => Err(invalid("encoded-owned native selection requires an explicit native-profile agreement and typed payload; these role binaries do not configure one")),
             Encoding::Protobuf => run_encoded_owned(role, &args, up_rust::ProtobufWire).await,
             Encoding::Xcdrv2 => run_encoded_owned(role, &args, up_wire_xcdrv2::XcdrV2Wire).await,
             Encoding::Arrow => run_encoded_owned(role, &args, up_wire_arrow::ArrowWire).await,
@@ -323,17 +322,8 @@ async fn run_owned(role: Role, args: &Args) -> Result<(), UStatus> {
 }
 
 fn frame_from_message(message: &UMessage) -> Result<UOwnedFrame, UStatus> {
-    let metadata = match message.payload() {
-        Some(_) => {
-            let encoding = message
-                .attributes()
-                .payload_encoding()
-                .ok_or_else(|| invalid("payload-bearing message has no encoding"))?;
-            message.to_frame_metadata(encoding)
-        }
-        None => message.to_frame_metadata_unencoded(),
-    }
-    .map_err(|error| invalid(format!("project frame metadata: {error}")))?;
+    let metadata = up_rust::frame::metadata::try_project_umessage_to_frame_metadata(message)
+        .map_err(|error| invalid(format!("project frame metadata: {error}")))?;
     match message.payload() {
         Some(payload) => UOwnedFrame::with_payload(metadata, payload.to_vec()),
         None => UOwnedFrame::without_payload(metadata),

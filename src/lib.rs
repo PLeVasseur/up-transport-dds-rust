@@ -284,15 +284,9 @@ fn decode_classic(sample: UpDdsClassicSampleV1) -> Result<UMessage, String> {
     }
     let attributes = UAttributes::parse_from_protobuf_bytes(&sample.attributes_proto)
         .map_err(|error| format!("invalid classic attributes: {error}"))?;
-    let metadata = if sample.has_payload {
-        let encoding = attributes
-            .payload_encoding()
-            .ok_or_else(|| "classic payload has no encoding".to_owned())?;
-        attributes.to_frame_metadata(encoding)
-    } else {
-        attributes.to_frame_metadata_unencoded()
-    }
-    .map_err(|error| format!("invalid classic metadata: {error}"))?;
+    let metadata = attributes
+        .try_project_to_frame_metadata()
+        .map_err(|error| format!("invalid classic metadata: {error}"))?;
     let payload = sample
         .has_payload
         .then(|| bytes::Bytes::from(sample.payload));

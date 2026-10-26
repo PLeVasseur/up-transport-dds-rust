@@ -42,19 +42,12 @@ fn endpoint(authority: &str) -> UUri {
 }
 
 fn metadata(source: &UUri, encoding: Option<PayloadEncoding>) -> UFrameMetadata {
-    let message = UMessageBuilder::publish(source.clone())
-        .build()
-        .expect("message");
+    let builder = UFrameMetadata::publish(source.clone());
     match encoding {
-        Some(encoding) => message
-            .attributes()
-            .to_frame_metadata(encoding)
-            .expect("payload encoding"),
-        None => message
-            .attributes()
-            .to_frame_metadata_unencoded()
-            .expect("metadata"),
+        Some(encoding) => builder.with_payload_encoding(encoding).build(),
+        None => builder.build(),
     }
+    .expect("metadata")
 }
 
 struct MessageChannel(mpsc::UnboundedSender<UMessage>);
@@ -100,7 +93,7 @@ async fn classic_distinct_instances_preserve_payload_presence_and_suppress_self(
     let sender = UPTransportDds::with_config(
         DdsConfig {
             origin_id: "classic-sender".to_owned(),
-            ..DdsConfig::new(171)
+            ..DdsConfig::new(41)
         },
         tokio::runtime::Handle::current(),
     )
@@ -108,7 +101,7 @@ async fn classic_distinct_instances_preserve_payload_presence_and_suppress_self(
     let receiver = UPTransportDds::with_config(
         DdsConfig {
             origin_id: "classic-receiver".to_owned(),
-            ..DdsConfig::new(171)
+            ..DdsConfig::new(41)
         },
         tokio::runtime::Handle::current(),
     )
@@ -299,7 +292,7 @@ async fn acknowledged_encoded_owned_write_survives_immediate_producer_drop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_families_validate_filters_and_none_requires_no_sink() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
-    let transport = UPTransportDds::new(172, tokio::runtime::Handle::current()).expect("transport");
+    let transport = UPTransportDds::new(42, tokio::runtime::Handle::current()).expect("transport");
     let invalid = endpoint("invalid-source").clone_with_resource_id(1);
     let (tx, _rx) = mpsc::unbounded_channel();
     let error = transport
@@ -308,7 +301,7 @@ async fn all_families_validate_filters_and_none_requires_no_sink() {
         .expect_err("invalid filter must fail");
     assert_eq!(error.code(), UCode::InvalidArgument);
 
-    let owned = UPTransportDdsOwned::new(172, tokio::runtime::Handle::current()).expect("owned");
+    let owned = UPTransportDdsOwned::new(42, tokio::runtime::Handle::current()).expect("owned");
     let (tx, _rx) = mpsc::unbounded_channel();
     let error = owned
         .register_owned_listener(&invalid, None, Arc::new(OwnedChannel(tx)))
@@ -316,7 +309,7 @@ async fn all_families_validate_filters_and_none_requires_no_sink() {
         .expect_err("invalid owned filter must fail");
     assert_eq!(error.code(), UCode::InvalidArgument);
 
-    let encoded_owned = DdsEncodedOwnedCore::new(172, tokio::runtime::Handle::current())
+    let encoded_owned = DdsEncodedOwnedCore::new(42, tokio::runtime::Handle::current())
         .unwrap()
         .into_protobuf_transport();
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -332,8 +325,8 @@ async fn none_sink_filter_matches_only_sinkless_messages() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
     let source = topic(12);
     let sink = endpoint("sink-filter");
-    let sender = UPTransportDds::new(183, tokio::runtime::Handle::current()).expect("sender");
-    let receiver = UPTransportDds::new(183, tokio::runtime::Handle::current()).expect("receiver");
+    let sender = UPTransportDds::new(53, tokio::runtime::Handle::current()).expect("sender");
+    let receiver = UPTransportDds::new(53, tokio::runtime::Handle::current()).expect("receiver");
     sender.wait_ready(2, WAIT).expect("sender discovery");
 
     let (sinkless_tx, mut sinkless_rx) = mpsc::unbounded_channel();
@@ -384,9 +377,9 @@ async fn none_sink_filter_matches_only_sinkless_messages() {
 async fn owned_distinct_instances_preserve_absent_empty_and_nonempty() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
     let source = topic(3);
-    let sender = UPTransportDdsOwned::new(173, tokio::runtime::Handle::current()).expect("sender");
+    let sender = UPTransportDdsOwned::new(43, tokio::runtime::Handle::current()).expect("sender");
     let receiver =
-        UPTransportDdsOwned::new(173, tokio::runtime::Handle::current()).expect("receiver");
+        UPTransportDdsOwned::new(43, tokio::runtime::Handle::current()).expect("receiver");
     sender.wait_ready(2, WAIT).expect("sender discovery");
     receiver.wait_ready(2, WAIT).expect("receiver discovery");
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -498,7 +491,7 @@ macro_rules! selected_wire_round_trip {
 
 selected_wire_round_trip!(
     xcdrv2_round_trip,
-    174,
+    44,
     4,
     up_wire_xcdrv2::XcdrV2Wire,
     up_wire_xcdrv2::XcdrV2Wire,
@@ -509,7 +502,7 @@ selected_wire_round_trip!(
 
 selected_wire_round_trip!(
     arrow_round_trip,
-    175,
+    45,
     5,
     up_wire_arrow::ArrowWire,
     up_wire_arrow::ArrowWire,
@@ -520,7 +513,7 @@ selected_wire_round_trip!(
 
 selected_wire_round_trip!(
     omg_idl_round_trip,
-    176,
+    46,
     6,
     up_wire_omgidl::OmgIdlWire,
     up_wire_omgidl::OmgIdlWire,
@@ -534,9 +527,9 @@ async fn selected_wire_mismatch_is_rejected_before_user_callback() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
     let source = topic(9);
     let sender_core =
-        DdsEncodedOwnedCore::new(180, tokio::runtime::Handle::current()).expect("sender");
+        DdsEncodedOwnedCore::new(50, tokio::runtime::Handle::current()).expect("sender");
     let receiver_core =
-        DdsEncodedOwnedCore::new(180, tokio::runtime::Handle::current()).expect("receiver");
+        DdsEncodedOwnedCore::new(50, tokio::runtime::Handle::current()).expect("receiver");
     sender_core.wait_ready(2, WAIT).expect("sender discovery");
     let sender = sender_core.into_native_prefix_wire_transport(up_wire_xcdrv2::XcdrV2Wire);
     let receiver = receiver_core.into_native_prefix_wire_transport(up_wire_arrow::ArrowWire);
@@ -566,9 +559,9 @@ async fn selected_wire_mismatch_is_rejected_before_user_callback() {
 async fn classic_validated_owned_and_encoded_owned_remain_physically_isolated() {
     let _guard = DDS_TEST_LOCK.lock().await;
     let runtime = tokio::runtime::Handle::current();
-    let classic = UPTransportDds::new(177, runtime.clone()).unwrap();
-    let owned = UPTransportDdsOwned::new(177, runtime.clone()).unwrap();
-    let encoded = DdsEncodedOwnedCore::new(177, runtime).unwrap();
+    let classic = UPTransportDds::new(47, runtime.clone()).unwrap();
+    let owned = UPTransportDdsOwned::new(47, runtime.clone()).unwrap();
+    let encoded = DdsEncodedOwnedCore::new(47, runtime).unwrap();
     classic.wait_ready(1, WAIT).unwrap();
     owned.wait_ready(1, WAIT).unwrap();
     encoded.wait_ready(1, WAIT).unwrap();
@@ -592,9 +585,9 @@ async fn encoded_owned_preserves_absent_empty_and_nonempty_payloads() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
     let source = topic(11);
     let sender_core =
-        DdsEncodedOwnedCore::new(182, tokio::runtime::Handle::current()).expect("sender");
+        DdsEncodedOwnedCore::new(52, tokio::runtime::Handle::current()).expect("sender");
     let receiver_core =
-        DdsEncodedOwnedCore::new(182, tokio::runtime::Handle::current()).expect("receiver");
+        DdsEncodedOwnedCore::new(52, tokio::runtime::Handle::current()).expect("receiver");
     sender_core.wait_ready(2, WAIT).expect("discovery");
     let sender = sender_core.into_native_prefix_wire_transport(up_rust::ProtobufWire);
     let receiver = receiver_core.into_native_prefix_wire_transport(up_rust::ProtobufWire);
@@ -655,8 +648,8 @@ async fn encoded_owned_core_carries_metadata_opaquely_and_routes_from_sideband()
 
     let source = topic(13);
     let receiver =
-        DdsEncodedOwnedCore::new(186, tokio::runtime::Handle::current()).expect("receiver");
-    let (participant, writer) = raw_encoded_owned_writer(186);
+        DdsEncodedOwnedCore::new(56, tokio::runtime::Handle::current()).expect("receiver");
+    let (participant, writer) = raw_encoded_owned_writer(56);
     wait_for_writer_match(&writer);
     let (tx, mut rx) = mpsc::unbounded_channel();
     receiver
@@ -697,8 +690,8 @@ async fn encoded_owned_core_carries_metadata_opaquely_and_routes_from_sideband()
 async fn malformed_owned_sample_from_distinct_participant_is_observable() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
     let receiver =
-        UPTransportDdsOwned::new(187, tokio::runtime::Handle::current()).expect("owned receiver");
-    let (participant, writer) = raw_owned_writer(187);
+        UPTransportDdsOwned::new(57, tokio::runtime::Handle::current()).expect("owned receiver");
+    let (participant, writer) = raw_owned_writer(57);
     wait_for_writer_match(&writer);
     writer
         .write(
@@ -757,7 +750,7 @@ async fn assert_advisory_routing_is_not_semantic_authority(
     physical: UFrameMetadata,
     conflicting: UFrameMetadata,
 ) {
-    use up_rust::{NativePrefixFrameMetadataCodec, ProtobufWire, UWire, UWireMetadataCodec};
+    use up_rust::{NativePrefixFrameMetadataCodec, ProtobufWire, UWireMetadataCodec};
 
     let receiver = DdsEncodedOwnedCore::new(domain, tokio::runtime::Handle::current())
         .unwrap()
@@ -789,7 +782,13 @@ async fn assert_advisory_routing_is_not_semantic_authority(
     // adapter must apply each public filter to decoded metadata, never the hint.
     for (semantic, payload) in [(&conflicting, b"hint"), (&physical, b"good")] {
         let encoded = NativePrefixFrameMetadataCodec
-            .encode_frame_metadata(ProtobufWire::metadata_context(), semantic)
+            .encode_frame_metadata(
+                up_rust::UWireMetadataContext::from_wire::<
+                    ProtobufWire,
+                    up_rust::NativePrefixFrameMetadataCodec,
+                >(),
+                semantic,
+            )
             .unwrap();
         writer
             .write(
@@ -837,11 +836,11 @@ async fn assert_advisory_routing_is_not_semantic_authority(
 async fn bounded_dispatch_reports_backpressure() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
     let source = topic(10);
-    let sender = UPTransportDds::new(181, tokio::runtime::Handle::current()).expect("sender");
+    let sender = UPTransportDds::new(51, tokio::runtime::Handle::current()).expect("sender");
     let receiver = UPTransportDds::with_config(
         DdsConfig {
             dispatch_capacity: 1,
-            ..DdsConfig::new(181)
+            ..DdsConfig::new(51)
         },
         tokio::runtime::Handle::current(),
     )
@@ -893,8 +892,8 @@ impl UListener for BlockingListener {
 async fn unregister_waits_for_inflight_and_prevents_later_callbacks() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
     let source = topic(8);
-    let sender = UPTransportDds::new(178, tokio::runtime::Handle::current()).expect("sender");
-    let receiver = UPTransportDds::new(178, tokio::runtime::Handle::current()).expect("receiver");
+    let sender = UPTransportDds::new(48, tokio::runtime::Handle::current()).expect("sender");
+    let receiver = UPTransportDds::new(48, tokio::runtime::Handle::current()).expect("receiver");
     sender.wait_ready(2, WAIT).expect("sender discovery");
     let listener = Arc::new(BlockingListener {
         calls: AtomicUsize::new(0),
@@ -940,7 +939,7 @@ fn shutdown_is_joined_and_domain_can_restart() {
     let _test_guard = DDS_TEST_LOCK.blocking_lock();
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     for _ in 0..2 {
-        let transport = UPTransportDds::new(179, runtime.handle().clone()).expect("transport");
+        let transport = UPTransportDds::new(49, runtime.handle().clone()).expect("transport");
         transport.wait_ready(1, WAIT).expect("local discovery");
         let health = transport.health();
         drop(transport);
@@ -949,7 +948,7 @@ fn shutdown_is_joined_and_domain_can_restart() {
     }
     for _ in 0..2 {
         let transport =
-            UPTransportDdsOwned::new(184, runtime.handle().clone()).expect("owned transport");
+            UPTransportDdsOwned::new(54, runtime.handle().clone()).expect("owned transport");
         transport.wait_ready(1, WAIT).expect("owned discovery");
         let health = transport.health();
         drop(transport);
@@ -957,7 +956,7 @@ fn shutdown_is_joined_and_domain_can_restart() {
         assert_eq!(health.snapshot().teardown_errors, 0);
     }
     for _ in 0..2 {
-        let transport = DdsEncodedOwnedCore::new(185, runtime.handle().clone())
+        let transport = DdsEncodedOwnedCore::new(55, runtime.handle().clone())
             .expect("encoded-owned transport");
         transport
             .wait_ready(1, WAIT)

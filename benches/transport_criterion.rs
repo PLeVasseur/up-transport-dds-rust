@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use up_rust::{
-    EncodePayload, PayloadCodecIdentity, PayloadEncoding, UMessageBuilder, UOwnedFrame,
-    UOwnedTransport, UTransport, UUri, UWithNativePrefixWire as _,
+    EncodePayload, PayloadCodecIdentity, PayloadEncoding, UFrameMetadata, UMessageBuilder,
+    UOwnedFrame, UOwnedTransport, UTransport, UUri, UWithNativePrefixWire as _,
 };
 use up_transport_dds::encoded_owned::DdsEncodedOwnedCore;
 use up_transport_dds::owned::UPTransportDdsOwned;
@@ -55,12 +55,9 @@ fn transport_benches(criterion: &mut Criterion) {
     owned
         .wait_ready(1, Duration::from_secs(8))
         .expect("owned discovery");
-    let message = UMessageBuilder::publish(source())
+    let metadata = UFrameMetadata::publish(source())
+        .with_payload_encoding(PayloadEncoding::RAW)
         .build()
-        .expect("metadata message");
-    let metadata = message
-        .attributes()
-        .to_frame_metadata(PayloadEncoding::RAW)
         .expect("frame metadata");
     let frame = UOwnedFrame::with_payload(metadata, vec![0x5A; 1024]).expect("owned frame");
     group.bench_function("owned_encode_and_publish_1k", |bencher| {
@@ -79,12 +76,9 @@ fn transport_benches(criterion: &mut Criterion) {
                 .expect("encoded-owned discovery");
             let transport = core.into_native_prefix_wire_transport($wire);
             let value: $value_ty = $value;
-            let message = UMessageBuilder::publish(source())
+            let metadata = UFrameMetadata::publish(source())
+                .with_payload_encoding(<$wire_ty as PayloadCodecIdentity>::encoding())
                 .build()
-                .expect("metadata message");
-            let metadata = message
-                .attributes()
-                .to_frame_metadata(<$wire_ty as PayloadCodecIdentity>::encoding())
                 .expect("payload encoding");
             group.bench_function($name, |bencher| {
                 bencher.iter(|| {
