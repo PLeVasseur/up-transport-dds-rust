@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Dust DDS RTPS transports for Eclipse uProtocol.
 //!
-//! The crate implements two independently versioned carriage families:
-//! classic [`UPTransportDds`] and owned [`owned::UPTransportDdsOwned`]. See
+//! The crate implements three independently versioned carriage families:
+//! classic [`UPTransportDds`], owned [`owned::UPTransportDdsOwned`], and the
+//! selected-wire encoded-owned core [`encoded_owned::DdsEncodedOwnedCore`]. See
 //! the [wire and capability guide](guide) for the exact storage and API boundary.
 
 #![allow(clippy::module_name_repetitions)]
@@ -11,6 +12,7 @@
 #[doc = include_str!("../docs/wire-contract.md")]
 pub mod guide {}
 
+pub mod encoded_owned;
 pub mod owned;
 mod runtime;
 

@@ -1,16 +1,62 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Live classic and owned RTPS contracts; encoded-owned joins in its own unit.
+//! Live RTPS contract tests for all DDS carriage families.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use async_trait::async_trait;
-use std::{sync::Arc, time::Duration};
-use tokio::sync::{mpsc, Mutex};
+use dust_dds::domain::domain_participant::DomainParticipant;
+use dust_dds::domain::domain_participant_factory::DomainParticipantFactory;
+use dust_dds::infrastructure::listener::NO_LISTENER;
+use dust_dds::infrastructure::qos::QosKind;
+use dust_dds::infrastructure::status::NO_STATUS;
+use dust_dds::publication::data_writer::DataWriter;
+use tokio::sync::{mpsc, Mutex, Notify};
 use up_rust::{
-    PayloadEncoding, UCode, UFrameMetadata, UListener, UMessage, UMessageBuilder, UOwnedFrame,
-    UOwnedListener, UOwnedTransport, UTransport, UUri,
+    EncodePayload, EncodedOwnedFrame, PayloadCodecIdentity, PayloadEncoding, ReadDecodePayload,
+    UCode, UEncodedOwnedListener, UFrameMetadata, UListener, UMessage, UMessageBuilder,
+    UOwnedFrame, UOwnedListener, UOwnedTransport, UOwnedTransportCore, UTransport, UUri,
+    UWithNativePrefixWire as _,
 };
-use up_transport_dds::owned::UPTransportDdsOwned;
+use up_transport_dds::encoded_owned::{
+    DdsEncodedOwnedCore, UpDdsEncodedOwnedSampleV1, ENCODED_OWNED_TOPIC_V1, ENCODED_OWNED_TYPE_V1,
+};
+use up_transport_dds::owned::{
+    UPTransportDdsOwned, UpDdsOwnedSampleV1, OWNED_TOPIC_V1, OWNED_TYPE_V1,
+};
 use up_transport_dds::{DdsConfig, UPTransportDds};
+
 const WAIT: Duration = Duration::from_secs(8);
+static_assertions::assert_impl_all!(DdsEncodedOwnedCore: UOwnedTransportCore, Send, Sync);
+static_assertions::assert_not_impl_any!(DdsEncodedOwnedCore: up_rust::UZeroCopyTransportCore, up_rust::UZeroCopyUninitTransportCore);
 static DDS_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn topic(tag: u16) -> UUri {
+    UUri::try_from_parts("dds-tests", 0x10_000 + u32::from(tag), 1, 0x8000 + tag)
+        .expect("valid topic")
+}
+
+fn endpoint(authority: &str) -> UUri {
+    UUri::try_from_parts(authority, 0x1_2345, 1, 0).expect("valid endpoint")
+}
+
+fn metadata(source: &UUri, encoding: Option<PayloadEncoding>) -> UFrameMetadata {
+    let message = UMessageBuilder::publish(source.clone())
+        .build()
+        .expect("message");
+    match encoding {
+        Some(encoding) => message
+            .attributes()
+            .to_frame_metadata(encoding)
+            .expect("payload encoding"),
+        None => message
+            .attributes()
+            .to_frame_metadata_unencoded()
+            .expect("metadata"),
+    }
+}
+
 struct MessageChannel(mpsc::UnboundedSender<UMessage>);
 
 #[async_trait]
@@ -29,33 +75,24 @@ impl UOwnedListener for OwnedChannel {
     }
 }
 
-fn topic(tag: u16) -> UUri {
-    UUri::try_from_parts("dds-tests", 0x10_000 + u32::from(tag), 1, 0x8000 + tag)
-        .expect("valid topic")
-}
-fn metadata(source: &UUri, encoding: Option<PayloadEncoding>) -> UFrameMetadata {
-    let message = UMessageBuilder::publish(source.clone())
-        .build()
-        .expect("message");
-    match encoding {
-        Some(encoding) => message
-            .attributes()
-            .to_frame_metadata(encoding)
-            .expect("payload encoding"),
-        None => message
-            .attributes()
-            .to_frame_metadata_unencoded()
-            .expect("metadata"),
+struct FrameChannel(mpsc::UnboundedSender<UOwnedFrame>);
+
+#[async_trait]
+impl UOwnedListener for FrameChannel {
+    async fn on_receive_owned(&self, frame: UOwnedFrame) {
+        let _ = self.0.send(frame);
     }
 }
-fn trace_acknowledgement_if_requested() {
-    if let Ok(filter) = std::env::var("UP_DDS_TRACE") {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .try_init();
+
+struct EncodedChannel(mpsc::UnboundedSender<EncodedOwnedFrame>);
+
+#[async_trait]
+impl UEncodedOwnedListener for EncodedChannel {
+    async fn on_receive_encoded_owned(&self, frame: EncodedOwnedFrame) {
+        let _ = self.0.send(frame);
     }
 }
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn classic_distinct_instances_preserve_payload_presence_and_suppress_self() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
@@ -126,6 +163,223 @@ async fn classic_distinct_instances_preserve_payload_presence_and_suppress_self(
             .is_err()
     );
 }
+
+fn trace_acknowledgement_if_requested() {
+    if let Ok(filter) = std::env::var("UP_DDS_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .try_init();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_classic_write_survives_immediate_producer_drop() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    trace_acknowledgement_if_requested();
+    let source = topic(21);
+    let sender = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
+    let receiver = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_listener(&source, None, Arc::new(MessageChannel(tx)))
+        .await
+        .unwrap();
+    sender.wait_ready(2, WAIT).unwrap();
+    let message = UMessageBuilder::publish(source)
+        .build_with_payload(b"one reliable write".to_vec(), PayloadEncoding::RAW)
+        .unwrap();
+    sender.send(message).await.unwrap();
+    sender.wait_acknowledged(WAIT).unwrap();
+    assert_eq!(
+        sender
+            .wait_acknowledged(Duration::from_secs(1_u64 << 31))
+            .unwrap_err()
+            .code(),
+        UCode::InvalidArgument
+    );
+    drop(sender);
+    let delivered = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivered.payload().unwrap().as_ref(), b"one reliable write");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_owned_write_survives_immediate_producer_drop() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    trace_acknowledgement_if_requested();
+    let source = topic(22);
+    let sender = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
+    let receiver = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_owned_listener(&source, None, Arc::new(OwnedChannel(tx)))
+        .await
+        .unwrap();
+    sender.wait_ready(2, WAIT).unwrap();
+    sender
+        .send_owned(
+            UOwnedFrame::with_payload(
+                metadata(&source, Some(PayloadEncoding::RAW)),
+                b"one reliable owned write".to_vec(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    sender.wait_acknowledged(WAIT).unwrap();
+    assert_eq!(
+        sender
+            .wait_acknowledged(Duration::from_secs(1_u64 << 31))
+            .unwrap_err()
+            .code(),
+        UCode::InvalidArgument
+    );
+    drop(sender);
+    let delivered = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "owned delivery after acknowledgement: {error}; receiver health: {:?}",
+                receiver.health().snapshot()
+            )
+        })
+        .unwrap();
+    assert_eq!(delivered.payload_bytes(), b"one reliable owned write");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_encoded_owned_write_survives_immediate_producer_drop() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    trace_acknowledgement_if_requested();
+    let source = topic(23);
+    let sender = DdsEncodedOwnedCore::new(212, tokio::runtime::Handle::current())
+        .unwrap()
+        .into_protobuf_transport();
+    let receiver = DdsEncodedOwnedCore::new(212, tokio::runtime::Handle::current())
+        .unwrap()
+        .into_protobuf_transport();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_owned_listener(&source, None, Arc::new(FrameChannel(tx)))
+        .await
+        .unwrap();
+    sender.core().wait_ready(2, WAIT).unwrap();
+    let bytes = b"one reliable encoded-owned write";
+    let frame = UOwnedFrame::with_payload(
+        metadata(&source, Some(PayloadEncoding::PROTOBUF)),
+        bytes.to_vec(),
+    )
+    .unwrap();
+    sender.send_owned(frame).await.unwrap();
+    sender.core().wait_acknowledged(WAIT).unwrap();
+    assert_eq!(
+        sender
+            .core()
+            .wait_acknowledged(Duration::from_secs(1_u64 << 31))
+            .unwrap_err()
+            .code(),
+        UCode::InvalidArgument
+    );
+    drop(sender);
+    let delivered = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "encoded-owned delivery after acknowledgement: {error}; receiver health: {:?}",
+                receiver.core().health().snapshot()
+            )
+        })
+        .unwrap();
+    assert_eq!(delivered.payload_bytes(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_families_validate_filters_and_none_requires_no_sink() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let transport = UPTransportDds::new(172, tokio::runtime::Handle::current()).expect("transport");
+    let invalid = endpoint("invalid-source").clone_with_resource_id(1);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = transport
+        .register_listener(&invalid, None, Arc::new(MessageChannel(tx)))
+        .await
+        .expect_err("invalid filter must fail");
+    assert_eq!(error.code(), UCode::InvalidArgument);
+
+    let owned = UPTransportDdsOwned::new(172, tokio::runtime::Handle::current()).expect("owned");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = owned
+        .register_owned_listener(&invalid, None, Arc::new(OwnedChannel(tx)))
+        .await
+        .expect_err("invalid owned filter must fail");
+    assert_eq!(error.code(), UCode::InvalidArgument);
+
+    let encoded_owned = DdsEncodedOwnedCore::new(172, tokio::runtime::Handle::current())
+        .unwrap()
+        .into_protobuf_transport();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = encoded_owned
+        .register_owned_listener(&invalid, None, Arc::new(FrameChannel(tx)))
+        .await
+        .expect_err("invalid encoded-owned filter must fail validation");
+    assert_eq!(error.code(), UCode::InvalidArgument);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn none_sink_filter_matches_only_sinkless_messages() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(12);
+    let sink = endpoint("sink-filter");
+    let sender = UPTransportDds::new(183, tokio::runtime::Handle::current()).expect("sender");
+    let receiver = UPTransportDds::new(183, tokio::runtime::Handle::current()).expect("receiver");
+    sender.wait_ready(2, WAIT).expect("sender discovery");
+
+    let (sinkless_tx, mut sinkless_rx) = mpsc::unbounded_channel();
+    receiver
+        .register_listener(&source, None, Arc::new(MessageChannel(sinkless_tx)))
+        .await
+        .expect("sinkless listener");
+    let (addressed_tx, mut addressed_rx) = mpsc::unbounded_channel();
+    receiver
+        .register_listener(&source, Some(&sink), Arc::new(MessageChannel(addressed_tx)))
+        .await
+        .expect("addressed listener");
+
+    sender
+        .send(
+            UMessageBuilder::notification(source.clone(), sink)
+                .build()
+                .expect("notification"),
+        )
+        .await
+        .expect("send notification");
+    tokio::time::timeout(WAIT, addressed_rx.recv())
+        .await
+        .expect("addressed timeout")
+        .expect("addressed message");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), sinkless_rx.recv())
+            .await
+            .is_err()
+    );
+
+    sender
+        .send(UMessageBuilder::publish(source).build().expect("publish"))
+        .await
+        .expect("send publish");
+    tokio::time::timeout(WAIT, sinkless_rx.recv())
+        .await
+        .expect("sinkless timeout")
+        .expect("sinkless message");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), addressed_rx.recv())
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owned_distinct_instances_preserve_absent_empty_and_nonempty() {
     let _test_guard = DDS_TEST_LOCK.lock().await;
@@ -185,78 +439,598 @@ async fn owned_distinct_instances_preserve_absent_empty_and_nonempty() {
             .is_err()
     );
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn acknowledged_classic_write_survives_immediate_producer_drop() {
-    let _guard = DDS_TEST_LOCK.lock().await;
-    trace_acknowledgement_if_requested();
-    let source = topic(21);
-    let sender = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
-    let receiver = UPTransportDds::new(210, tokio::runtime::Handle::current()).unwrap();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    receiver
-        .register_listener(&source, None, Arc::new(MessageChannel(tx)))
-        .await
-        .unwrap();
-    sender.wait_ready(2, WAIT).unwrap();
-    let message = UMessageBuilder::publish(source)
-        .build_with_payload(b"one reliable write".to_vec(), PayloadEncoding::RAW)
-        .unwrap();
-    sender.send(message).await.unwrap();
-    sender.wait_acknowledged(WAIT).unwrap();
-    assert_eq!(
-        sender
-            .wait_acknowledged(Duration::from_secs(1_u64 << 31))
-            .unwrap_err()
-            .code(),
-        UCode::InvalidArgument
-    );
-    drop(sender);
-    let delivered = tokio::time::timeout(WAIT, rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(delivered.payload().unwrap().as_ref(), b"one reliable write");
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn acknowledged_owned_write_survives_immediate_producer_drop() {
-    let _guard = DDS_TEST_LOCK.lock().await;
-    trace_acknowledgement_if_requested();
-    let source = topic(22);
-    let sender = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
-    let receiver = UPTransportDdsOwned::new(211, tokio::runtime::Handle::current()).unwrap();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    receiver
-        .register_owned_listener(&source, None, Arc::new(OwnedChannel(tx)))
-        .await
-        .unwrap();
-    sender.wait_ready(2, WAIT).unwrap();
-    sender
-        .send_owned(
-            UOwnedFrame::with_payload(
-                metadata(&source, Some(PayloadEncoding::RAW)),
-                b"one reliable owned write".to_vec(),
+
+macro_rules! selected_wire_round_trip {
+    ($name:ident, $domain:expr, $tag:expr, $wire:expr, $wire_ty:ty, $value:expr, $value_ty:ty, $decode_limit:expr) => {
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn $name() {
+            let _test_guard = DDS_TEST_LOCK.lock().await;
+            let source = topic($tag);
+            let sender_core = DdsEncodedOwnedCore::new($domain, tokio::runtime::Handle::current())
+                .expect("sender");
+            let receiver_core =
+                DdsEncodedOwnedCore::new($domain, tokio::runtime::Handle::current())
+                    .expect("receiver");
+            sender_core.wait_ready(2, WAIT).expect("sender discovery");
+            receiver_core
+                .wait_ready(2, WAIT)
+                .expect("receiver discovery");
+            let sender = sender_core.into_native_prefix_wire_transport($wire);
+            let receiver = receiver_core.into_native_prefix_wire_transport($wire);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            receiver
+                .register_owned_listener(&source, None, Arc::new(FrameChannel(tx)))
+                .await
+                .expect("register");
+
+            let value: $value_ty = $value;
+            let payload = <$wire_ty as EncodePayload<$value_ty>>::encode_payload_owned(&value)
+                .expect("encode");
+            let frame = UOwnedFrame::with_payload(
+                metadata(
+                    &source,
+                    Some(<$wire_ty as PayloadCodecIdentity>::encoding()),
+                ),
+                payload,
             )
-            .unwrap(),
+            .unwrap();
+            sender.send_owned(frame).await.expect("send");
+            let frame = tokio::time::timeout(WAIT, rx.recv())
+                .await
+                .expect("timeout")
+                .expect("frame");
+            drop(sender);
+            drop(receiver);
+            assert_eq!(
+                frame.metadata().payload_encoding(),
+                Some(&<$wire_ty as PayloadCodecIdentity>::encoding())
+            );
+            let decoded = <$wire_ty as ReadDecodePayload<$value_ty>>::decode_payload_from_reader(
+                frame.payload_bytes(),
+                frame.payload_bytes().len(),
+                $decode_limit,
+            )
+            .expect("decode retained owned frame");
+            assert_eq!(decoded, value);
+        }
+    };
+}
+
+selected_wire_round_trip!(
+    xcdrv2_round_trip,
+    174,
+    4,
+    up_wire_xcdrv2::XcdrV2Wire,
+    up_wire_xcdrv2::XcdrV2Wire,
+    up_wire_xcdrv2::VEHICLE_SIGNAL_V1_GOLDEN_VALUE,
+    up_wire_xcdrv2::VehicleSignalV1,
+    up_wire_xcdrv2::VEHICLE_SIGNAL_V1_DECODE_LIMIT
+);
+
+selected_wire_round_trip!(
+    arrow_round_trip,
+    175,
+    5,
+    up_wire_arrow::ArrowWire,
+    up_wire_arrow::ArrowWire,
+    up_wire_arrow::TelemetryTableV1::fixture(64, 7),
+    up_wire_arrow::TelemetryTableV1,
+    up_wire_arrow::ARROW_IPC_DECODE_LIMIT
+);
+
+selected_wire_round_trip!(
+    omg_idl_round_trip,
+    176,
+    6,
+    up_wire_omgidl::OmgIdlWire,
+    up_wire_omgidl::OmgIdlWire,
+    up_wire_omgidl::VehicleStatusV1::fixture(42),
+    up_wire_omgidl::VehicleStatusV1,
+    up_wire_omgidl::OMG_IDL_DECODE_LIMIT
+);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selected_wire_mismatch_is_rejected_before_user_callback() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(9);
+    let sender_core =
+        DdsEncodedOwnedCore::new(180, tokio::runtime::Handle::current()).expect("sender");
+    let receiver_core =
+        DdsEncodedOwnedCore::new(180, tokio::runtime::Handle::current()).expect("receiver");
+    sender_core.wait_ready(2, WAIT).expect("sender discovery");
+    let sender = sender_core.into_native_prefix_wire_transport(up_wire_xcdrv2::XcdrV2Wire);
+    let receiver = receiver_core.into_native_prefix_wire_transport(up_wire_arrow::ArrowWire);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_owned_listener(&source, None, Arc::new(FrameChannel(tx)))
+        .await
+        .expect("register");
+
+    let value = up_wire_xcdrv2::VEHICLE_SIGNAL_V1_GOLDEN_VALUE;
+    let payload = <up_wire_xcdrv2::XcdrV2Wire as EncodePayload<
+        up_wire_xcdrv2::VehicleSignalV1,
+    >>::encode_payload_owned(&value)
+    .expect("encode");
+    let frame = UOwnedFrame::with_payload(
+        metadata(&source, Some(up_wire_xcdrv2::XcdrV2Wire::encoding())),
+        payload,
+    )
+    .unwrap();
+    sender.send_owned(frame).await.expect("send");
+    assert!(tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        .await
+        .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn classic_validated_owned_and_encoded_owned_remain_physically_isolated() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    let runtime = tokio::runtime::Handle::current();
+    let classic = UPTransportDds::new(177, runtime.clone()).unwrap();
+    let owned = UPTransportDdsOwned::new(177, runtime.clone()).unwrap();
+    let encoded = DdsEncodedOwnedCore::new(177, runtime).unwrap();
+    classic.wait_ready(1, WAIT).unwrap();
+    owned.wait_ready(1, WAIT).unwrap();
+    encoded.wait_ready(1, WAIT).unwrap();
+    let probe = Duration::from_millis(250);
+    assert_eq!(
+        classic.wait_ready(2, probe).unwrap_err().code(),
+        UCode::DeadlineExceeded
+    );
+    assert_eq!(
+        owned.wait_ready(2, probe).unwrap_err().code(),
+        UCode::DeadlineExceeded
+    );
+    assert_eq!(
+        encoded.wait_ready(2, probe).unwrap_err().code(),
+        UCode::DeadlineExceeded
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn encoded_owned_preserves_absent_empty_and_nonempty_payloads() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(11);
+    let sender_core =
+        DdsEncodedOwnedCore::new(182, tokio::runtime::Handle::current()).expect("sender");
+    let receiver_core =
+        DdsEncodedOwnedCore::new(182, tokio::runtime::Handle::current()).expect("receiver");
+    sender_core.wait_ready(2, WAIT).expect("discovery");
+    let sender = sender_core.into_native_prefix_wire_transport(up_rust::ProtobufWire);
+    let receiver = receiver_core.into_native_prefix_wire_transport(up_rust::ProtobufWire);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_owned_listener(&source, None, Arc::new(FrameChannel(tx)))
+        .await
+        .expect("register");
+    let (self_tx, mut self_rx) = mpsc::unbounded_channel();
+    sender
+        .register_owned_listener(&source, None, Arc::new(FrameChannel(self_tx)))
+        .await
+        .expect("self register");
+
+    let absent = UOwnedFrame::without_payload(metadata(&source, None)).unwrap();
+    sender.send_owned(absent).await.expect("send absent");
+    let empty = UOwnedFrame::with_payload(
+        metadata(&source, Some(up_rust::ProtobufWire::encoding())),
+        Vec::new(),
+    )
+    .unwrap();
+    sender.send_owned(empty).await.expect("send empty");
+    let nonempty = UOwnedFrame::with_payload(
+        metadata(&source, Some(up_rust::ProtobufWire::encoding())),
+        b"abc".to_vec(),
+    )
+    .unwrap();
+    sender.send_owned(nonempty).await.expect("send nonempty");
+
+    let absent = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .expect("timeout")
+        .expect("absent frame");
+    let empty = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .expect("timeout")
+        .expect("empty frame");
+    let nonempty = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .expect("timeout")
+        .expect("nonempty frame");
+    assert!(absent.metadata().payload_encoding().is_none());
+    assert!(!absent.has_payload());
+    assert!(empty.metadata().payload_encoding().is_some());
+    assert!(empty.has_payload());
+    assert!(empty.payload_bytes().is_empty());
+    assert_eq!(nonempty.payload_bytes(), b"abc");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), self_rx.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn encoded_owned_core_carries_metadata_opaquely_and_routes_from_sideband() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+
+    let source = topic(13);
+    let receiver =
+        DdsEncodedOwnedCore::new(186, tokio::runtime::Handle::current()).expect("receiver");
+    let (participant, writer) = raw_encoded_owned_writer(186);
+    wait_for_writer_match(&writer);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    receiver
+        .register_encoded_owned_listener(&source, None, Arc::new(EncodedChannel(tx)))
+        .await
+        .expect("register encoded listener");
+
+    let encoded_metadata = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    writer
+        .write(
+            UpDdsEncodedOwnedSampleV1 {
+                origin_id: "opaque-peer".to_owned(),
+                source_uri: source.to_uri(false),
+                has_sink: false,
+                sink_uri: String::new(),
+                has_payload: true,
+                encoded_metadata: encoded_metadata.clone(),
+                payload: b"data".to_vec(),
+            },
+            None,
+        )
+        .unwrap();
+
+    let frame = tokio::time::timeout(WAIT, rx.recv())
+        .await
+        .expect("receive timeout")
+        .expect("encoded frame");
+    assert_eq!(frame.encoded_metadata(), encoded_metadata);
+    assert_eq!(frame.payload().unwrap().as_ref(), b"data");
+    drop(writer);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance()
+        .delete_participant(&participant)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_owned_sample_from_distinct_participant_is_observable() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let receiver =
+        UPTransportDdsOwned::new(187, tokio::runtime::Handle::current()).expect("owned receiver");
+    let (participant, writer) = raw_owned_writer(187);
+    wait_for_writer_match(&writer);
+    writer
+        .write(
+            UpDdsOwnedSampleV1 {
+                origin_id: "malformed-peer".to_owned(),
+                metadata_fields: vec![0xFF],
+                has_payload: false,
+                payload: Vec::new(),
+            },
+            None,
+        )
+        .expect("write malformed sample");
+
+    tokio::time::timeout(WAIT, async {
+        while receiver.health().snapshot().malformed_samples == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("malformed sample was not observed");
+    assert_eq!(receiver.health().snapshot().malformed_samples, 1);
+
+    drop(writer);
+    participant
+        .delete_contained_entities()
+        .expect("delete raw writer entities");
+    DomainParticipantFactory::get_instance()
+        .delete_participant(&participant)
+        .expect("delete raw writer participant");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sideband_source_hint_cannot_override_decoded_public_source_filter() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    let physical = metadata(&topic(24), Some(PayloadEncoding::PROTOBUF));
+    let conflicting = metadata(&topic(25), Some(PayloadEncoding::PROTOBUF));
+    assert_advisory_routing_is_not_semantic_authority(214, physical, conflicting).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sideband_sink_hint_cannot_override_decoded_public_sink_filter() {
+    let _guard = DDS_TEST_LOCK.lock().await;
+    let physical = UFrameMetadata::notification(topic(26), endpoint("expected-sink"))
+        .with_payload_encoding(PayloadEncoding::PROTOBUF)
+        .build()
+        .unwrap();
+    let conflicting = UFrameMetadata::notification(topic(26), endpoint("different-sink"))
+        .with_payload_encoding(PayloadEncoding::PROTOBUF)
+        .build()
+        .unwrap();
+    assert_advisory_routing_is_not_semantic_authority(215, physical, conflicting).await;
+}
+
+async fn assert_advisory_routing_is_not_semantic_authority(
+    domain: i32,
+    physical: UFrameMetadata,
+    conflicting: UFrameMetadata,
+) {
+    use up_rust::{NativePrefixFrameMetadataCodec, ProtobufWire, UWire, UWireMetadataCodec};
+
+    let receiver = DdsEncodedOwnedCore::new(domain, tokio::runtime::Handle::current())
+        .unwrap()
+        .into_protobuf_transport();
+    let (participant, writer) = raw_encoded_owned_writer(domain);
+    let (exact_tx, mut exact_rx) = mpsc::unbounded_channel();
+    receiver
+        .register_owned_listener(
+            physical.source(),
+            physical.sink(),
+            Arc::new(FrameChannel(exact_tx)),
         )
         .await
         .unwrap();
-    sender.wait_acknowledged(WAIT).unwrap();
-    assert_eq!(
-        sender
-            .wait_acknowledged(Duration::from_secs(1_u64 << 31))
-            .unwrap_err()
-            .code(),
-        UCode::InvalidArgument
-    );
-    drop(sender);
-    let delivered = tokio::time::timeout(WAIT, rx.recv())
+    let (broad_tx, mut broad_rx) = mpsc::unbounded_channel();
+    let any_sink = physical.sink().map(|_| UUri::any());
+    receiver
+        .register_owned_listener(
+            &UUri::any(),
+            any_sink.as_ref(),
+            Arc::new(FrameChannel(broad_tx)),
+        )
         .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "owned delivery after acknowledgement: {error}; receiver health: {:?}",
-                receiver.health().snapshot()
-            )
-        })
         .unwrap();
-    assert_eq!(delivered.payload_bytes(), b"one reliable owned write");
+    wait_for_writer_match(&writer);
+
+    // Deliberately make the raw core's advisory route disagree with the encoded
+    // source/sink. Both listeners are physical candidates, but the common SDK
+    // adapter must apply each public filter to decoded metadata, never the hint.
+    for (semantic, payload) in [(&conflicting, b"hint"), (&physical, b"good")] {
+        let encoded = NativePrefixFrameMetadataCodec
+            .encode_frame_metadata(ProtobufWire::metadata_context(), semantic)
+            .unwrap();
+        writer
+            .write(
+                UpDdsEncodedOwnedSampleV1 {
+                    origin_id: "advisory-peer".to_owned(),
+                    source_uri: physical.source().to_uri(false),
+                    has_sink: physical.sink().is_some(),
+                    sink_uri: physical
+                        .sink()
+                        .map_or_else(String::new, |sink| sink.to_uri(false)),
+                    has_payload: true,
+                    encoded_metadata: encoded,
+                    payload: payload.to_vec(),
+                },
+                None,
+            )
+            .unwrap();
+    }
+    let exact = tokio::time::timeout(WAIT, exact_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exact.payload_bytes(), b"good");
+    assert_eq!(exact.metadata(), &physical);
+    let broad_first = tokio::time::timeout(WAIT, broad_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(broad_first.payload_bytes(), b"hint");
+    assert_eq!(broad_first.metadata(), &conflicting);
+    let broad_second = tokio::time::timeout(WAIT, broad_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(broad_second.metadata(), &physical);
+    assert!(exact_rx.try_recv().is_err());
+    drop(writer);
+    participant.delete_contained_entities().unwrap();
+    DomainParticipantFactory::get_instance()
+        .delete_participant(&participant)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bounded_dispatch_reports_backpressure() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(10);
+    let sender = UPTransportDds::new(181, tokio::runtime::Handle::current()).expect("sender");
+    let receiver = UPTransportDds::with_config(
+        DdsConfig {
+            dispatch_capacity: 1,
+            ..DdsConfig::new(181)
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .expect("receiver");
+    sender.wait_ready(2, WAIT).expect("discovery");
+    let listener = Arc::new(BlockingListener {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    receiver
+        .register_listener(&source, None, listener.clone())
+        .await
+        .expect("register");
+    for _ in 0..16 {
+        sender
+            .send(
+                UMessageBuilder::publish(source.clone())
+                    .build()
+                    .expect("message"),
+            )
+            .await
+            .expect("send");
+    }
+    tokio::time::timeout(WAIT, listener.entered.notified())
+        .await
+        .expect("callback entered");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(receiver.health().snapshot().dispatch_drops > 0);
+    listener.release.notify_one();
+}
+
+struct BlockingListener {
+    calls: AtomicUsize,
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl UListener for BlockingListener {
+    async fn on_receive(&self, _message: UMessage) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        self.release.notified().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unregister_waits_for_inflight_and_prevents_later_callbacks() {
+    let _test_guard = DDS_TEST_LOCK.lock().await;
+    let source = topic(8);
+    let sender = UPTransportDds::new(178, tokio::runtime::Handle::current()).expect("sender");
+    let receiver = UPTransportDds::new(178, tokio::runtime::Handle::current()).expect("receiver");
+    sender.wait_ready(2, WAIT).expect("sender discovery");
+    let listener = Arc::new(BlockingListener {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    let erased: Arc<dyn UListener> = listener.clone();
+    receiver
+        .register_listener(&source, None, erased.clone())
+        .await
+        .expect("register");
+    sender
+        .send(
+            UMessageBuilder::publish(source.clone())
+                .build()
+                .expect("message"),
+        )
+        .await
+        .expect("send");
+    tokio::time::timeout(WAIT, listener.entered.notified())
+        .await
+        .expect("callback entered");
+
+    let release_listener = Arc::clone(&listener);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release_listener.release.notify_one();
+    });
+    receiver
+        .unregister_listener(&source, None, erased)
+        .await
+        .expect("unregister");
+    sender
+        .send(UMessageBuilder::publish(source).build().expect("message"))
+        .await
+        .expect("send after unregister");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(listener.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn shutdown_is_joined_and_domain_can_restart() {
+    let _test_guard = DDS_TEST_LOCK.blocking_lock();
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    for _ in 0..2 {
+        let transport = UPTransportDds::new(179, runtime.handle().clone()).expect("transport");
+        transport.wait_ready(1, WAIT).expect("local discovery");
+        let health = transport.health();
+        drop(transport);
+        assert_eq!(health.snapshot().worker_panics, 0);
+        assert_eq!(health.snapshot().teardown_errors, 0);
+    }
+    for _ in 0..2 {
+        let transport =
+            UPTransportDdsOwned::new(184, runtime.handle().clone()).expect("owned transport");
+        transport.wait_ready(1, WAIT).expect("owned discovery");
+        let health = transport.health();
+        drop(transport);
+        assert_eq!(health.snapshot().worker_panics, 0);
+        assert_eq!(health.snapshot().teardown_errors, 0);
+    }
+    for _ in 0..2 {
+        let transport = DdsEncodedOwnedCore::new(185, runtime.handle().clone())
+            .expect("encoded-owned transport");
+        transport
+            .wait_ready(1, WAIT)
+            .expect("encoded-owned discovery");
+        let health = transport.health();
+        drop(transport);
+        assert_eq!(health.snapshot().worker_panics, 0);
+        assert_eq!(health.snapshot().teardown_errors, 0);
+    }
+}
+
+fn raw_owned_writer(domain_id: i32) -> (DomainParticipant, DataWriter<UpDdsOwnedSampleV1>) {
+    let factory = DomainParticipantFactory::get_instance();
+    let participant = factory
+        .create_participant(domain_id, QosKind::Default, NO_LISTENER, NO_STATUS)
+        .expect("create raw participant");
+    let topic = participant
+        .create_topic::<UpDdsOwnedSampleV1>(
+            OWNED_TOPIC_V1,
+            OWNED_TYPE_V1,
+            QosKind::Default,
+            NO_LISTENER,
+            NO_STATUS,
+        )
+        .expect("create raw topic");
+    let publisher = participant
+        .create_publisher(QosKind::Default, NO_LISTENER, NO_STATUS)
+        .expect("create raw publisher");
+    let writer = publisher
+        .create_datawriter::<UpDdsOwnedSampleV1>(&topic, QosKind::Default, NO_LISTENER, NO_STATUS)
+        .expect("create raw writer");
+    (participant, writer)
+}
+
+fn raw_encoded_owned_writer(
+    domain_id: i32,
+) -> (DomainParticipant, DataWriter<UpDdsEncodedOwnedSampleV1>) {
+    let participant = DomainParticipantFactory::get_instance()
+        .create_participant(domain_id, QosKind::Default, NO_LISTENER, NO_STATUS)
+        .unwrap();
+    let topic = participant
+        .create_topic::<UpDdsEncodedOwnedSampleV1>(
+            ENCODED_OWNED_TOPIC_V1,
+            ENCODED_OWNED_TYPE_V1,
+            QosKind::Default,
+            NO_LISTENER,
+            NO_STATUS,
+        )
+        .unwrap();
+    let publisher = participant
+        .create_publisher(QosKind::Default, NO_LISTENER, NO_STATUS)
+        .unwrap();
+    let writer = publisher
+        .create_datawriter(&topic, QosKind::Default, NO_LISTENER, NO_STATUS)
+        .unwrap();
+    (participant, writer)
+}
+
+fn wait_for_writer_match<T>(writer: &DataWriter<T>) {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        if writer
+            .get_publication_matched_status()
+            .expect("raw writer matched status")
+            .current_count
+            >= 1
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "raw writer discovery timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

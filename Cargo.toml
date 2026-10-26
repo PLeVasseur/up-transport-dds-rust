@@ -40,6 +40,34 @@ static_assertions = "=1.1.0"
 criterion = { version = "0.5.1", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[[bench]]
+name = "transport_criterion"
+harness = false
+
+[[bin]]
+name = "dds_publisher"
+path = "src/bin/dds_publisher.rs"
+
+[[bin]]
+name = "dds_subscriber"
+path = "src/bin/dds_subscriber.rs"
+
+[[bin]]
+name = "dds_notifier"
+path = "src/bin/dds_notifier.rs"
+
+[[bin]]
+name = "dds_notifyee"
+path = "src/bin/dds_notifyee.rs"
+
+[[bin]]
+name = "dds_client"
+path = "src/bin/dds_client.rs"
+
+[[bin]]
+name = "dds_server"
+path = "src/bin/dds_server.rs"
+
 [lints.rust]
 missing_docs = "deny"
 
