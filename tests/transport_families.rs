@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Live RTPS contract tests for all DDS carriage families.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -16,7 +17,7 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use up_rust::{
     EncodePayload, EncodedOwnedFrame, PayloadCodecIdentity, PayloadEncoding, ReadDecodePayload,
     UCode, UEncodedOwnedListener, UFrameMetadata, UListener, UMessage, UMessageBuilder,
-    UOwnedFrame, UOwnedListener, UOwnedTransport, UOwnedTransportCore, UTransport, UUri,
+    UOwnedFrame, UOwnedListener, UOwnedTransport, UOwnedTransportCore, UStatus, UTransport, UUri,
     UWithNativePrefixWire as _,
 };
 use up_transport_dds::encoded_owned::{
@@ -932,6 +933,480 @@ async fn unregister_waits_for_inflight_and_prevents_later_callbacks() {
         .expect("send after unregister");
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert_eq!(listener.calls.load(Ordering::SeqCst), 1);
+}
+
+const LIFECYCLE_BURST: usize = 4;
+
+/// Leaks a value dropped while panicking, so a failed lifecycle test cannot
+/// hang in a wedged transport's joining `Drop`; otherwise drops normally.
+struct LeakOnPanic<T>(Option<T>);
+
+impl<T> std::ops::Deref for LeakOnPanic<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.0.as_ref().expect("value is present until drop")
+    }
+}
+
+impl<T> Drop for LeakOnPanic<T> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            std::mem::forget(self.0.take());
+        }
+    }
+}
+
+/// Runs a listener-lifecycle scenario on a dedicated multi-thread runtime.
+///
+/// A regression can wedge a callback worker forever. A failed scenario shuts
+/// the runtime down in the background so the suite reports the failure
+/// instead of waiting for that worker.
+fn run_lifecycle_scenario(scenario: impl Future<Output = ()>) {
+    let _test_guard = DDS_TEST_LOCK.blocking_lock();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(scenario))) {
+        Ok(()) => drop(runtime),
+        Err(panic) => {
+            runtime.shutdown_background();
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+/// Classic listener that unregisters its own exact registration when called.
+struct SelfUnregisteringListener {
+    me: Weak<Self>,
+    transport: Weak<UPTransportDds>,
+    source: UUri,
+    calls: AtomicUsize,
+    unregistered: mpsc::UnboundedSender<Result<(), UStatus>>,
+}
+
+#[async_trait]
+impl UListener for SelfUnregisteringListener {
+    async fn on_receive(&self, _message: UMessage) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        // Release the transport before reporting, so the test always owns the
+        // last transport handle and never drops it inside a callback.
+        let result = {
+            let transport = self
+                .transport
+                .upgrade()
+                .expect("receiver outlives callback");
+            let me: Arc<dyn UListener> = self.me.upgrade().expect("listener is alive");
+            transport.unregister_listener(&self.source, None, me).await
+        };
+        let _ = self.unregistered.send(result);
+    }
+}
+
+/// Owned-family listener that unregisters its own exact registration when called.
+struct SelfUnregisteringOwnedListener<T> {
+    me: Weak<Self>,
+    transport: Weak<T>,
+    source: UUri,
+    calls: AtomicUsize,
+    unregistered: mpsc::UnboundedSender<Result<(), UStatus>>,
+}
+
+#[async_trait]
+impl<T: UOwnedTransport + 'static> UOwnedListener for SelfUnregisteringOwnedListener<T> {
+    async fn on_receive_owned(&self, _frame: UOwnedFrame) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let result = {
+            let transport = self
+                .transport
+                .upgrade()
+                .expect("receiver outlives callback");
+            let me: Arc<dyn UOwnedListener> = self.me.upgrade().expect("listener is alive");
+            transport
+                .unregister_owned_listener(&self.source, None, me)
+                .await
+        };
+        let _ = self.unregistered.send(result);
+    }
+}
+
+#[test]
+fn classic_callback_unregisters_itself_without_waiting_for_itself() {
+    run_lifecycle_scenario(async {
+        let source = topic(27);
+        let runtime = tokio::runtime::Handle::current();
+        let sender = UPTransportDds::new(64, runtime.clone()).expect("sender");
+        let receiver = LeakOnPanic(Some(Arc::new(
+            UPTransportDds::new(64, runtime).expect("receiver"),
+        )));
+        sender.wait_ready(2, WAIT).expect("discovery");
+        let (unregistered, mut unregister_result) = mpsc::unbounded_channel();
+        let listener = Arc::new_cyclic(|me| SelfUnregisteringListener {
+            me: me.clone(),
+            transport: Arc::downgrade(&*receiver),
+            source: source.clone(),
+            calls: AtomicUsize::new(0),
+            unregistered,
+        });
+        receiver
+            .register_listener(&source, None, listener.clone())
+            .await
+            .expect("register self-unregistering listener");
+        let (witness_tx, mut witness_rx) = mpsc::unbounded_channel();
+        receiver
+            .register_listener(&source, None, Arc::new(MessageChannel(witness_tx)))
+            .await
+            .expect("register witness");
+        for _ in 0..LIFECYCLE_BURST {
+            let message = UMessageBuilder::publish(source.clone())
+                .build()
+                .expect("message");
+            sender.send(message).await.expect("send");
+        }
+
+        tokio::time::timeout(WAIT, unregister_result.recv())
+            .await
+            .unwrap_or_else(|elapsed| {
+                panic!(
+                    "a callback unregistering itself must not wait for its own completion: \
+                     {elapsed}; callback entries: {}",
+                    listener.calls.load(Ordering::SeqCst)
+                )
+            })
+            .expect("self-unregister result")
+            .expect("self-unregister succeeds");
+        // The witness registered later, so its last delivery follows every job
+        // snapshotted for the self-unregistered listener.
+        for _ in 0..LIFECYCLE_BURST {
+            tokio::time::timeout(WAIT, witness_rx.recv())
+                .await
+                .expect("dispatch continues after self-unregister")
+                .expect("witness message");
+        }
+        assert_eq!(listener.calls.load(Ordering::SeqCst), 1);
+        let erased: Arc<dyn UListener> = listener;
+        let error = receiver
+            .unregister_listener(&source, None, erased)
+            .await
+            .expect_err("self-unregister removed the registration");
+        assert_eq!(error.code(), UCode::NotFound);
+    });
+}
+
+async fn assert_owned_callback_unregisters_itself<S, R>(
+    sender: &S,
+    receiver: &Arc<R>,
+    source: &UUri,
+) where
+    S: UOwnedTransport,
+    R: UOwnedTransport + 'static,
+{
+    let (unregistered, mut unregister_result) = mpsc::unbounded_channel();
+    let listener = Arc::new_cyclic(|me| SelfUnregisteringOwnedListener {
+        me: me.clone(),
+        transport: Arc::downgrade(receiver),
+        source: source.clone(),
+        calls: AtomicUsize::new(0),
+        unregistered,
+    });
+    receiver
+        .register_owned_listener(source, None, listener.clone())
+        .await
+        .expect("register self-unregistering listener");
+    let (witness_tx, mut witness_rx) = mpsc::unbounded_channel();
+    receiver
+        .register_owned_listener(source, None, Arc::new(FrameChannel(witness_tx)))
+        .await
+        .expect("register witness");
+    for _ in 0..LIFECYCLE_BURST {
+        let frame = UOwnedFrame::without_payload(metadata(source, None)).expect("frame");
+        sender.send_owned(frame).await.expect("send");
+    }
+
+    tokio::time::timeout(WAIT, unregister_result.recv())
+        .await
+        .unwrap_or_else(|elapsed| {
+            panic!(
+                "a callback unregistering itself must not wait for its own completion: \
+                 {elapsed}; callback entries: {}",
+                listener.calls.load(Ordering::SeqCst)
+            )
+        })
+        .expect("self-unregister result")
+        .expect("self-unregister succeeds");
+    for _ in 0..LIFECYCLE_BURST {
+        tokio::time::timeout(WAIT, witness_rx.recv())
+            .await
+            .expect("dispatch continues after self-unregister")
+            .expect("witness frame");
+    }
+    assert_eq!(listener.calls.load(Ordering::SeqCst), 1);
+    let erased: Arc<dyn UOwnedListener> = listener;
+    let error = receiver
+        .unregister_owned_listener(source, None, erased)
+        .await
+        .expect_err("self-unregister removed the registration");
+    assert_eq!(error.code(), UCode::NotFound);
+}
+
+#[test]
+fn owned_callback_unregisters_itself_without_waiting_for_itself() {
+    run_lifecycle_scenario(async {
+        let runtime = tokio::runtime::Handle::current();
+        let sender = UPTransportDdsOwned::new(65, runtime.clone()).expect("sender");
+        let receiver = LeakOnPanic(Some(Arc::new(
+            UPTransportDdsOwned::new(65, runtime).expect("receiver"),
+        )));
+        sender.wait_ready(2, WAIT).expect("discovery");
+        assert_owned_callback_unregisters_itself(&sender, &*receiver, &topic(28)).await;
+    });
+}
+
+#[test]
+fn encoded_owned_callback_unregisters_itself_without_waiting_for_itself() {
+    run_lifecycle_scenario(async {
+        let runtime = tokio::runtime::Handle::current();
+        let sender = DdsEncodedOwnedCore::new(66, runtime.clone()).expect("sender");
+        let receiver = DdsEncodedOwnedCore::new(66, runtime).expect("receiver");
+        sender.wait_ready(2, WAIT).expect("discovery");
+        let sender = sender.into_protobuf_transport();
+        let receiver = LeakOnPanic(Some(Arc::new(receiver.into_protobuf_transport())));
+        assert_owned_callback_unregisters_itself(&sender, &*receiver, &topic(29)).await;
+    });
+}
+
+/// Listener that retains what it receives and stays entered until released.
+struct HeldListener<M> {
+    retained: std::sync::Mutex<Vec<M>>,
+    calls: AtomicUsize,
+    entered: Notify,
+    release: Notify,
+    completed: AtomicBool,
+}
+
+impl<M> Default for HeldListener<M> {
+    fn default() -> Self {
+        Self {
+            retained: std::sync::Mutex::new(Vec::new()),
+            calls: AtomicUsize::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+            completed: AtomicBool::new(false),
+        }
+    }
+}
+
+impl<M: Send> HeldListener<M> {
+    async fn hold(&self, received: M) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.retained
+            .lock()
+            .expect("retained storage")
+            .push(received);
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.completed.store(true, Ordering::SeqCst);
+    }
+
+    fn take_retained(&self) -> M {
+        self.retained
+            .lock()
+            .expect("retained storage")
+            .pop()
+            .expect("retained delivery")
+    }
+}
+
+#[async_trait]
+impl UListener for HeldListener<UMessage> {
+    async fn on_receive(&self, message: UMessage) {
+        self.hold(message).await;
+    }
+}
+
+#[async_trait]
+impl UOwnedListener for HeldListener<UOwnedFrame> {
+    async fn on_receive_owned(&self, frame: UOwnedFrame) {
+        self.hold(frame).await;
+    }
+}
+
+/// Spawns an external unregister and checks that it waits for the entered
+/// callback, returning only after that callback completed.
+async fn assert_external_unregister_waits<M, F>(held: &Arc<HeldListener<M>>, unregister_call: F)
+where
+    M: Send + 'static,
+    F: Future<Output = Result<(), UStatus>> + Send + 'static,
+{
+    tokio::time::timeout(WAIT, held.entered.notified())
+        .await
+        .expect("callback entered");
+    let started = Arc::new(Notify::new());
+    let mut unregister = tokio::spawn({
+        let held = Arc::clone(held);
+        let started = Arc::clone(&started);
+        async move {
+            started.notify_one();
+            let result = unregister_call.await;
+            (result, held.completed.load(Ordering::SeqCst))
+        }
+    });
+    tokio::time::timeout(WAIT, started.notified())
+        .await
+        .expect("external unregister started");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut unregister)
+            .await
+            .is_err(),
+        "external unregister must wait for the entered callback"
+    );
+    held.release.notify_one();
+    let (result, completed) = tokio::time::timeout(WAIT, unregister)
+        .await
+        .expect("external unregister completes after release")
+        .expect("external unregister task");
+    result.expect("external unregister succeeds");
+    assert!(
+        completed,
+        "unregister returned before the entered callback completed"
+    );
+}
+
+#[test]
+fn classic_external_unregister_waits_for_entered_callback_and_keeps_its_message() {
+    run_lifecycle_scenario(async {
+        let source = topic(30);
+        let runtime = tokio::runtime::Handle::current();
+        let sender = UPTransportDds::new(67, runtime.clone()).expect("sender");
+        let receiver = LeakOnPanic(Some(Arc::new(
+            UPTransportDds::new(67, runtime).expect("receiver"),
+        )));
+        sender.wait_ready(2, WAIT).expect("discovery");
+        let held = Arc::new(HeldListener::<UMessage>::default());
+        let erased: Arc<dyn UListener> = held.clone();
+        receiver
+            .register_listener(&source, None, erased.clone())
+            .await
+            .expect("register held listener");
+        let (witness_tx, mut witness_rx) = mpsc::unbounded_channel();
+        receiver
+            .register_listener(&source, None, Arc::new(MessageChannel(witness_tx)))
+            .await
+            .expect("register witness");
+        let message = UMessageBuilder::publish(source.clone())
+            .build_with_payload(b"retained".to_vec(), PayloadEncoding::RAW)
+            .expect("message");
+        sender.send(message).await.expect("send");
+
+        let unregister_receiver = Arc::clone(&*receiver);
+        let unregister_source = source.clone();
+        assert_external_unregister_waits(&held, async move {
+            unregister_receiver
+                .unregister_listener(&unregister_source, None, erased)
+                .await
+        })
+        .await;
+        tokio::time::timeout(WAIT, witness_rx.recv())
+            .await
+            .expect("witness timeout")
+            .expect("witness message");
+        let later = UMessageBuilder::publish(source)
+            .build()
+            .expect("later message");
+        sender.send(later).await.expect("send later");
+        tokio::time::timeout(WAIT, witness_rx.recv())
+            .await
+            .expect("later witness timeout")
+            .expect("later witness message");
+        assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+
+        drop(sender);
+        drop(receiver);
+        let retained = held.take_retained();
+        assert_eq!(retained.payload().expect("payload").as_ref(), b"retained");
+    });
+}
+
+async fn assert_owned_external_unregister_waits<S, R>(
+    sender: S,
+    receiver: LeakOnPanic<Arc<R>>,
+    source: UUri,
+) where
+    S: UOwnedTransport,
+    R: UOwnedTransport + 'static,
+{
+    let held = Arc::new(HeldListener::<UOwnedFrame>::default());
+    let erased: Arc<dyn UOwnedListener> = held.clone();
+    receiver
+        .register_owned_listener(&source, None, erased.clone())
+        .await
+        .expect("register held listener");
+    let (witness_tx, mut witness_rx) = mpsc::unbounded_channel();
+    receiver
+        .register_owned_listener(&source, None, Arc::new(FrameChannel(witness_tx)))
+        .await
+        .expect("register witness");
+    let frame = UOwnedFrame::with_payload(
+        metadata(&source, Some(PayloadEncoding::PROTOBUF)),
+        b"retained".to_vec(),
+    )
+    .expect("frame");
+    sender.send_owned(frame).await.expect("send");
+
+    let unregister_receiver = Arc::clone(&*receiver);
+    let unregister_source = source.clone();
+    assert_external_unregister_waits(&held, async move {
+        unregister_receiver
+            .unregister_owned_listener(&unregister_source, None, erased)
+            .await
+    })
+    .await;
+    tokio::time::timeout(WAIT, witness_rx.recv())
+        .await
+        .expect("witness timeout")
+        .expect("witness frame");
+    let later = UOwnedFrame::without_payload(metadata(&source, None)).expect("later frame");
+    sender.send_owned(later).await.expect("send later");
+    tokio::time::timeout(WAIT, witness_rx.recv())
+        .await
+        .expect("later witness timeout")
+        .expect("later witness frame");
+    assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+
+    drop(sender);
+    drop(receiver);
+    assert_eq!(held.take_retained().payload_bytes(), b"retained");
+}
+
+#[test]
+fn owned_external_unregister_waits_for_entered_callback_and_keeps_its_frame() {
+    run_lifecycle_scenario(async {
+        let runtime = tokio::runtime::Handle::current();
+        let sender = UPTransportDdsOwned::new(68, runtime.clone()).expect("sender");
+        let receiver = UPTransportDdsOwned::new(68, runtime).expect("receiver");
+        sender.wait_ready(2, WAIT).expect("discovery");
+        let receiver = LeakOnPanic(Some(Arc::new(receiver)));
+        assert_owned_external_unregister_waits(sender, receiver, topic(31)).await;
+    });
+}
+
+#[test]
+fn encoded_owned_external_unregister_waits_for_entered_callback_and_keeps_its_frame() {
+    run_lifecycle_scenario(async {
+        let runtime = tokio::runtime::Handle::current();
+        let sender = DdsEncodedOwnedCore::new(69, runtime.clone()).expect("sender");
+        let receiver = DdsEncodedOwnedCore::new(69, runtime).expect("receiver");
+        sender.wait_ready(2, WAIT).expect("discovery");
+        let receiver = LeakOnPanic(Some(Arc::new(receiver.into_protobuf_transport())));
+        assert_owned_external_unregister_waits(
+            sender.into_protobuf_transport(),
+            receiver,
+            topic(32),
+        )
+        .await;
+    });
 }
 
 #[test]

@@ -93,7 +93,9 @@ encoding identifiers are a separate namespace from wire/family/layout identities
 
 The core preserves the binding's existing bounded dispatch queue, wakeable poll,
 in-flight listener removal, health reporting, joined shutdown and domain restart
-contracts. `wait_ready` reports DDS reader matching; `wait_acknowledged` reports
-prior writes acknowledged by currently matched reliable readers, not callback
-completion. The SDK's optional native quiescence extension is not a claim that
-this owned binding acquired native sample loans.
+contracts. Listener removal closes admission at once and waits for an entered
+callback, except that a callback unregistering its own registration does not
+wait for itself. `wait_ready` reports DDS reader matching; `wait_acknowledged`
+reports prior writes acknowledged by currently matched reliable readers, not
+callback completion. The SDK's optional native quiescence extension is not a
+claim that this owned binding acquired native sample loans.

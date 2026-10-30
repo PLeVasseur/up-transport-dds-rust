@@ -47,8 +47,10 @@ Transport send methods keep their existing local-write semantics.
 Background work is bounded and observable through `DdsHealth`. Dropping a
 transport wakes and joins its poller, cancels callback work, drains the bounded
 dispatcher, and deletes the participant's contained entities. Successful
-listener unregistration waits for an in-flight callback and prevents any
-snapshotted-but-not-started callback from running afterward.
+listener unregistration prevents any snapshotted-but-not-started callback from
+running afterward and waits for an in-flight callback. A callback may unregister
+its own registration: admission closes at once, and the call returns without
+waiting for the enclosing callback, which then runs to completion.
 
 ## Role Binaries
 

@@ -24,9 +24,10 @@ outer samples from DDS receive failures, but cannot attach the original malforme
 network corpus to the latter.
 ## Discovery-port placement for tests
 
-The transport-family suite uses domains 41–60, including acknowledgement/drop
-tests at 58–60. Their builtin multicast discovery ports (`7400 + 250 * domain`)
-are 17,650–22,400. Keep them outside the host's ephemeral
+The transport-family suite uses domains 41–60 and 64–69, including
+acknowledgement/drop tests at 58–60 and listener-lifecycle tests at 64–69. Their
+builtin multicast discovery ports (`7400 + 250 * domain`) are 17,650–22,400 and
+23,400–24,650. Keep them outside the host's ephemeral
 UDP range: Dust DDS first binds unicast sockets to port 0, then binds discovery's
 fixed port. Domains in the ephemeral range can collide with those earlier binds.
 The suite serializes participant groups; use separate namespaces for simultaneous

@@ -187,10 +187,9 @@ impl DdsEncodedOwnedCore {
                                                 &runtime,
                                                 &callback_stop,
                                                 &callback_health,
-                                                async move {
-                                                    let _in_flight = in_flight;
+                                                in_flight.enclose(async move {
                                                     listener.on_receive_encoded_owned(frame).await;
-                                                },
+                                                }),
                                             );
                                         }),
                                     );

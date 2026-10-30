@@ -14,7 +14,13 @@ use dust_dds::infrastructure::qos_policy::{HistoryQosPolicyKind, ReliabilityQosP
 use up_rust::{UCode, UStatus, UUri};
 
 static NEXT_ORIGIN: AtomicU64 = AtomicU64::new(1);
+static NEXT_REGISTRATION: AtomicU64 = AtomicU64::new(1);
 const MAX_HEALTH_EVENTS: usize = 64;
+
+tokio::task_local! {
+    /// Registration whose admitted callback encloses the current task.
+    static ENCLOSING_CALLBACK: u64;
+}
 
 /// DDS endpoint reliability policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,6 +371,7 @@ struct RegistrationState {
 }
 
 pub(crate) struct Registration<L: ?Sized> {
+    id: u64,
     source: UUri,
     sink: Option<UUri>,
     listener: Arc<L>,
@@ -387,27 +394,54 @@ impl<L: ?Sized> Registration<L> {
         Some(InFlight(Arc::clone(self)))
     }
 
+    /// Closes admission, then waits for callbacks entered outside the caller.
+    ///
+    /// A callback that unregisters its own registration still holds that
+    /// registration's [`InFlight`] guard. Waiting for it would make the callback
+    /// wait for itself, so only the guard of the caller's enclosing callback is
+    /// excluded; every other entered callback is still awaited.
     fn deactivate_and_wait(&self) {
+        let own = usize::from(self.encloses_current_task());
         let mut state = lock(&self.state);
         state.active = false;
-        while state.in_flight != 0 {
+        while state.in_flight > own {
             state = self
                 .idle
                 .wait(state)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
+
+    fn encloses_current_task(&self) -> bool {
+        ENCLOSING_CALLBACK
+            .try_with(|id| *id == self.id)
+            .unwrap_or(false)
+    }
 }
 
 pub(crate) struct InFlight<L: ?Sized>(Arc<Registration<L>>);
+
+impl<L: ?Sized> InFlight<L> {
+    /// Runs an admitted callback as this registration's enclosing callback.
+    ///
+    /// The guard is released when the callback returns, is cancelled or unwinds.
+    /// The task-local scope follows the task across worker threads and does not
+    /// allocate.
+    pub(crate) fn enclose<F: Future>(self, callback: F) -> impl Future<Output = F::Output> {
+        let id = self.0.id;
+        ENCLOSING_CALLBACK.scope(id, async move {
+            let _in_flight = self;
+            callback.await
+        })
+    }
+}
 
 impl<L: ?Sized> Drop for InFlight<L> {
     fn drop(&mut self) {
         let mut state = lock(&self.0.state);
         state.in_flight -= 1;
-        if state.in_flight == 0 {
-            self.0.idle.notify_all();
-        }
+        // A waiter may exclude its own guard, so it can be satisfied above zero.
+        self.0.idle.notify_all();
     }
 }
 
@@ -442,6 +476,7 @@ impl<L: ?Sized> Registry<L> {
             ));
         }
         entries.push(Arc::new(Registration {
+            id: NEXT_REGISTRATION.fetch_add(1, Ordering::Relaxed),
             source: source.clone(),
             sink: sink.cloned(),
             listener,
@@ -529,4 +564,44 @@ fn write<T>(rwlock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     rwlock
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filter() -> UUri {
+        UUri::try_from_parts("registry", 0x1_0001, 1, 0x8001).expect("filter")
+    }
+
+    #[test]
+    fn enclosing_callback_unregisters_itself_and_closes_snapshotted_admission() {
+        let registry = Arc::new(Registry::<()>::default());
+        let listener = Arc::new(());
+        registry
+            .register(&filter(), None, Arc::clone(&listener))
+            .expect("register");
+        let running = registry.matching(&filter(), None).pop().expect("job");
+        let snapshotted = registry.matching(&filter(), None).pop().expect("job");
+        let callback = running.begin().expect("admitted").enclose({
+            let registry = Arc::clone(&registry);
+            async move { registry.unregister(&filter(), None, &listener) }
+        });
+
+        // A self-wait regression must fail this test instead of hanging it, so
+        // the callback runs on a detached thread.
+        let (done, outcome) = mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            let _ = done.send(runtime.block_on(callback));
+        });
+        outcome
+            .recv_timeout(Duration::from_secs(5))
+            .expect("self-unregister must not wait for its own guard")
+            .expect("self-unregister succeeds");
+        assert!(snapshotted.begin().is_none());
+        assert!(registry.matching(&filter(), None).is_empty());
+    }
 }
