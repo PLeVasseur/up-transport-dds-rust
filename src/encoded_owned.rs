@@ -402,7 +402,7 @@ mod tests {
         let payload_address = payload.as_ptr();
         let (_, _, frame) = decode_encoded_owned(UpDdsEncodedOwnedSampleV1 {
             origin_id: "peer".to_owned(),
-            source_uri: "up://peer/10000/1/8001".to_owned(),
+            source_uri: "up://peer/0/1/1/8001".to_owned(),
             has_sink: false,
             sink_uri: String::new(),
             has_payload: true,
@@ -423,9 +423,9 @@ mod tests {
     fn encoded_owned_rejects_inconsistent_sideband_presence() {
         let error = decode_encoded_owned(UpDdsEncodedOwnedSampleV1 {
             origin_id: "peer".to_owned(),
-            source_uri: "up://peer/10000/1/8001".to_owned(),
+            source_uri: "up://peer/0/1/1/8001".to_owned(),
             has_sink: false,
-            sink_uri: "up://unexpected/10000/1/0".to_owned(),
+            sink_uri: "up://unexpected/0/1/1/0".to_owned(),
             has_payload: false,
             encoded_metadata: Vec::new(),
             payload: Vec::new(),

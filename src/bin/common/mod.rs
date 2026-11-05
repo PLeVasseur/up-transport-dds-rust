@@ -16,7 +16,7 @@ use up_transport_dds::encoded_owned::DdsEncodedOwnedCore;
 use up_transport_dds::owned::UPTransportDdsOwned;
 use up_transport_dds::{DdsConfig, Reliability, UPTransportDds};
 
-const ENTITY_ID: u32 = 0x5BA0;
+const ENTITY_ID: u32 = 0x0001_5BA0;
 const ENTITY_VERSION: u8 = 1;
 
 #[allow(dead_code)]
