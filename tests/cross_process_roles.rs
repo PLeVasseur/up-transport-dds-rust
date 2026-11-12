@@ -9,6 +9,25 @@ use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(15);
 
 #[test]
+fn obsolete_loan_family_and_alignment_options_are_rejected() {
+    for args in [
+        vec!["--route-family", "copy-minimized"],
+        vec![
+            "--route-family",
+            "encoded-owned",
+            "--payload-alignment",
+            "64",
+        ],
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_dds_publisher"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+    }
+}
+
+#[test]
 fn classic_pubsub_owned_notification_and_arrow_rpc_cross_process() {
     run_pair(
         env!("CARGO_BIN_EXE_dds_subscriber"),
@@ -28,7 +47,7 @@ fn classic_pubsub_owned_notification_and_arrow_rpc_cross_process() {
         env!("CARGO_BIN_EXE_dds_server"),
         env!("CARGO_BIN_EXE_dds_client"),
         63,
-        "copy-minimized",
+        "encoded-owned",
         "arrow",
     );
 }

@@ -3,14 +3,18 @@
 //!
 //! The crate implements three independently versioned carriage families:
 //! classic [`UPTransportDds`], owned [`owned::UPTransportDdsOwned`], and the
-//! behavioral zero-copy core [`zero_copy::DdsZeroCopyCore`]. See
-//! `docs/wire-contract.md` for the exact claim boundary.
+//! selected-wire encoded-owned core [`encoded_owned::DdsEncodedOwnedCore`]. See
+//! the [wire and capability guide](guide) for the exact storage and API boundary.
 
 #![allow(clippy::module_name_repetitions)]
 
+/// DDS physical carriage, owned capability and migration guide.
+#[doc = include_str!("../docs/wire-contract.md")]
+pub mod guide {}
+
+pub mod encoded_owned;
 pub mod owned;
 mod runtime;
-pub mod zero_copy;
 
 pub use runtime::{
     DdsConfig, DdsHealth, DdsQos, HealthErrorKind, HealthEvent, HealthSnapshot, Reliability,
@@ -24,16 +28,15 @@ use async_trait::async_trait;
 use dust_dds::domain::domain_participant::DomainParticipant;
 use dust_dds::domain::domain_participant_factory::DomainParticipantFactory;
 use dust_dds::infrastructure::error::DdsError;
+use dust_dds::infrastructure::listener::NO_LISTENER;
 use dust_dds::infrastructure::qos::QosKind;
 use dust_dds::infrastructure::sample_info::{ANY_INSTANCE_STATE, ANY_SAMPLE_STATE, ANY_VIEW_STATE};
 use dust_dds::infrastructure::status::NO_STATUS;
 use dust_dds::infrastructure::type_support::DdsType;
-use dust_dds::listener::NO_LISTENER;
 use dust_dds::publication::data_writer::DataWriter;
 use up_rust::{
-    try_project_attributes_to_frame_metadata, try_project_frame_to_umessage,
     verify_filter_criteria, ProtobufMappable as _, UAttributes, UCode, UListener, UMessage,
-    UStatus, UTransport, UUri,
+    UOwnedFrame, UStatus, UTransport, UUri,
 };
 
 use crate::runtime::{
@@ -48,6 +51,7 @@ pub const CLASSIC_TYPE_V1: &str = "UpDdsClassicSampleV1";
 
 /// Normative classic-family outer sample.
 #[derive(Clone, Debug, DdsType)]
+#[dust_dds(extensibility = "final")]
 pub struct UpDdsClassicSampleV1 {
     /// Exact originating transport instance.
     pub origin_id: String,
@@ -181,10 +185,9 @@ impl UPTransportDds {
                                                 &runtime,
                                                 &callback_stop,
                                                 &callback_health,
-                                                async move {
-                                                    let _in_flight = in_flight;
+                                                in_flight.enclose(async move {
                                                     listener.on_receive(message).await;
-                                                },
+                                                }),
                                             );
                                         }),
                                     );
@@ -244,6 +247,23 @@ impl UPTransportDds {
         )
     }
 
+    /// Waits for all prior writes to be acknowledged by matched reliable readers.
+    ///
+    /// Use after discovery and terminal sends, before dropping this transport.
+    /// A successful local write alone does not establish remote delivery. This
+    /// does not wait for future readers or application-level processing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unrepresentable timeout, a DDS failure or timeout.
+    pub fn wait_acknowledged(&self, timeout: Duration) -> Result<(), UStatus> {
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| UStatus::fail_with_code(UCode::Unavailable, "transport is closed"))?;
+        runtime::wait_acknowledged(writer, timeout)
+    }
+
     /// Returns a health handle that remains valid after shutdown.
     #[must_use]
     pub fn health(&self) -> DdsHealth {
@@ -263,12 +283,14 @@ fn decode_classic(sample: UpDdsClassicSampleV1) -> Result<UMessage, String> {
     }
     let attributes = UAttributes::parse_from_protobuf_bytes(&sample.attributes_proto)
         .map_err(|error| format!("invalid classic attributes: {error}"))?;
-    let metadata = try_project_attributes_to_frame_metadata(&attributes, None)
+    let metadata = attributes
+        .try_project_to_frame_metadata()
         .map_err(|error| format!("invalid classic metadata: {error}"))?;
     let payload = sample
         .has_payload
         .then(|| bytes::Bytes::from(sample.payload));
-    try_project_frame_to_umessage(metadata, payload)
+    UOwnedFrame::new(metadata, payload)
+        .and_then(|frame| frame.to_umessage())
         .map_err(|error| format!("invalid classic message: {error}"))
 }
 

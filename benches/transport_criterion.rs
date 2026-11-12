@@ -2,22 +2,18 @@
 //! Criterion send-stage benchmarks. Rust 1.95.0 is the benchmark authority.
 //!
 //! Every row uses best-effort DDS `QoS` so a fire-and-forget benchmark measures
-//! loan/encode/write cost without eventually blocking on reliable local history.
+//! encode/write cost without eventually blocking on reliable local history.
 //! These rows do not measure delivery, receive dispatch, or round-trip latency.
-
-#![allow(missing_docs)]
 
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use up_rust::selected_wire_user_api::UWithNativePrefixWire as _;
 use up_rust::{
-    try_project_umessage_to_frame_metadata, EncodePayload, PayloadEncoding, PayloadFormat,
-    UMessageBuilder, UOwnedFrame, UOwnedTransport, UPayloadFormat, UTransport, UTxBuffer,
-    UTxLoanSpec, UUri, UZeroCopyTransport,
+    EncodePayload, PayloadCodecIdentity, PayloadEncoding, UFrameMetadata, UMessageBuilder,
+    UOwnedFrame, UOwnedTransport, UTransport, UUri, UWithNativePrefixWire as _,
 };
+use up_transport_dds::encoded_owned::DdsEncodedOwnedCore;
 use up_transport_dds::owned::UPTransportDdsOwned;
-use up_transport_dds::zero_copy::DdsZeroCopyCore;
 use up_transport_dds::{DdsConfig, Reliability, UPTransportDds};
 
 fn source() -> UUri {
@@ -44,7 +40,7 @@ fn transport_benches(criterion: &mut Criterion) {
         .wait_ready(1, Duration::from_secs(8))
         .expect("classic discovery");
     let message = UMessageBuilder::publish(source())
-        .build_with_payload(vec![0xA5; 1024], UPayloadFormat::Raw)
+        .build_with_payload(vec![0xA5; 1024], PayloadEncoding::RAW)
         .expect("classic message");
     group.bench_function("classic_publish_1k", |bencher| {
         bencher.iter(|| {
@@ -59,14 +55,10 @@ fn transport_benches(criterion: &mut Criterion) {
     owned
         .wait_ready(1, Duration::from_secs(8))
         .expect("owned discovery");
-    let metadata = try_project_umessage_to_frame_metadata(
-        &UMessageBuilder::publish(source())
-            .build()
-            .expect("metadata message"),
-    )
-    .expect("frame metadata")
-    .with_payload_encoding(PayloadEncoding::RAW)
-    .expect("raw payload encoding");
+    let metadata = UFrameMetadata::publish(source())
+        .with_payload_encoding(PayloadEncoding::RAW)
+        .build()
+        .expect("frame metadata");
     let frame = UOwnedFrame::with_payload(metadata, vec![0x5A; 1024]).expect("owned frame");
     group.bench_function("owned_encode_and_publish_1k", |bencher| {
         bencher.iter(|| {
@@ -78,45 +70,29 @@ fn transport_benches(criterion: &mut Criterion) {
 
     macro_rules! selected_wire_bench {
         ($name:literal, $domain:expr, $wire:expr, $wire_ty:ty, $value:expr, $value_ty:ty) => {{
-            let core = DdsZeroCopyCore::with_config(benchmark_config($domain), handle.clone())
-                .expect("zero-copy core");
+            let core = DdsEncodedOwnedCore::with_config(benchmark_config($domain), handle.clone())
+                .expect("encoded-owned core");
             core.wait_ready(1, Duration::from_secs(8))
-                .expect("zero-copy discovery");
+                .expect("encoded-owned discovery");
             let transport = core.into_native_prefix_wire_transport($wire);
             let value: $value_ty = $value;
-            let layout = <$wire_ty as EncodePayload<$value_ty>>::payload_layout(&value)
-                .expect("payload layout");
-            let metadata = try_project_umessage_to_frame_metadata(
-                &UMessageBuilder::publish(source())
-                    .build()
-                    .expect("metadata message"),
-            )
-            .expect("frame metadata")
-            .with_payload_encoding(<$wire_ty as PayloadFormat>::encoding())
-            .expect("payload encoding");
+            let metadata = UFrameMetadata::publish(source())
+                .with_payload_encoding(<$wire_ty as PayloadCodecIdentity>::encoding())
+                .build()
+                .expect("payload encoding");
             group.bench_function($name, |bencher| {
                 bencher.iter(|| {
                     runtime.block_on(async {
-                        let mut loan = transport
-                            .loan_tx(
-                                UTxLoanSpec::payload(
-                                    black_box(metadata.clone()),
-                                    layout.len(),
-                                    layout.align(),
-                                )
-                                .expect("loan spec"),
-                            )
-                            .await
-                            .expect("loan");
-                        <$wire_ty as EncodePayload<$value_ty>>::encode_payload(
+                        let payload = <$wire_ty as EncodePayload<$value_ty>>::encode_payload_owned(
                             black_box(&value),
-                            loan.payload_mut(),
                         )
                         .expect("payload encode");
+                        let frame = UOwnedFrame::with_payload(black_box(metadata.clone()), payload)
+                            .expect("owned frame");
                         transport
-                            .send_zero_copy(loan)
+                            .send_owned(frame)
                             .await
-                            .expect("zero-copy publish");
+                            .expect("encoded-owned publish");
                     });
                 });
             });
@@ -124,7 +100,7 @@ fn transport_benches(criterion: &mut Criterion) {
     }
 
     selected_wire_bench!(
-        "copy_minimized_xcdrv2_loan_encode_publish",
+        "encoded_owned_xcdrv2_encode_publish",
         32,
         up_wire_xcdrv2::XcdrV2Wire,
         up_wire_xcdrv2::XcdrV2Wire,
@@ -132,7 +108,7 @@ fn transport_benches(criterion: &mut Criterion) {
         up_wire_xcdrv2::VehicleSignalV1
     );
     selected_wire_bench!(
-        "copy_minimized_arrow_loan_encode_publish",
+        "encoded_owned_arrow_encode_publish",
         33,
         up_wire_arrow::ArrowWire,
         up_wire_arrow::ArrowWire,
@@ -140,7 +116,7 @@ fn transport_benches(criterion: &mut Criterion) {
         up_wire_arrow::TelemetryTableV1
     );
     selected_wire_bench!(
-        "copy_minimized_omgidl_loan_encode_publish",
+        "encoded_owned_omgidl_encode_publish",
         34,
         up_wire_omgidl::OmgIdlWire,
         up_wire_omgidl::OmgIdlWire,
@@ -151,5 +127,8 @@ fn transport_benches(criterion: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, transport_benches);
-criterion_main!(benches);
+mod groups {
+    use super::{criterion_group, transport_benches};
+    criterion_group!(benches, transport_benches);
+}
+criterion_main!(groups::benches);
